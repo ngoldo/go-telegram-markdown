@@ -15,6 +15,7 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: stable
+          cache: false # no dependencies, no go.sum to cache
 
       - name: Check formatting
         run: test -z "$(gofmt -l .)"
