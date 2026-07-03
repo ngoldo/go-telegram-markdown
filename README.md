@@ -6,11 +6,18 @@ A Go library for converting standard Markdown to Telegram's MarkdownV2 format, w
 
 - ✅ Convert standard Markdown to Telegram MarkdownV2 format
 - ✅ Proper escaping of special characters, without double-escaping
-- ✅ Preserve code blocks and inline code without modification
+- ✅ Preserve code blocks and inline code (escaping only what the MarkdownV2 spec requires inside them)
 - ✅ Handle nested markdown formatting
 - ✅ Support for links, bold, italic, strikethrough, underline, and spoiler text
+- ✅ Word-boundary and flanking rules: list markers (`* item`), spaced operators (`5 * 3`), and intraword delimiters (`snake_case`, `file~1`) stay literal
+- ✅ Link URLs with balanced parentheses (Wikipedia-style) survive intact
 - ✅ Recursive processing of markdown inside link text
+- ✅ Always sendable: the result is guaranteed to be valid MarkdownV2 (see below)
 - ✅ Zero dependencies
+
+## Safety guarantee
+
+`Convert` never returns output that Telegram would reject with a "can't parse entities" error. Well-formed Markdown converts to the equivalent MarkdownV2. Deeply malformed input that can't be expressed as valid MarkdownV2 (for example crossing emphasis like `_~_~`) falls back to the text escaped as plain — still delivered, just without formatting. This is verified by fuzzing: every output parses as balanced MarkdownV2.
 
 ## Installation
 

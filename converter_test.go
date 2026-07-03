@@ -34,9 +34,9 @@ func TestConvert(t *testing.T) {
 
 		{"inline code", "This is `inline code`.", "This is `inline code`\\."},
 
-		{"code block", "```\ncode block\n```", "```\ncode block\n\n```"},
-		{"code block with inline code", "```\ncode block with `inline code`\n```", "```\ncode block with \\`inline code\\`\n\n```"},
-		{"code block with lang", "```python\nprint('Hello')\n```", "```python\nprint('Hello')\n\n```"},
+		{"code block", "```\ncode block\n```", "```\ncode block\n```"},
+		{"code block with inline code", "```\ncode block with `inline code`\n```", "```\ncode block with \\`inline code\\`\n```"},
+		{"code block with lang", "```python\nprint('Hello')\n```", "```python\nprint('Hello')\n```"},
 
 		{"nested bold italic", "**bold and _italic_ text**", "*bold and _italic_ text*"},
 		{"nested italic bold asterisk", "*italic **bold** text*", "_italic *bold* text_"},
@@ -44,11 +44,14 @@ func TestConvert(t *testing.T) {
 		{"triple asterisk", "***bold italic text***", "*_bold italic text_*"},
 		{"nested italic underline", "_italic and __underline__ text_", "_italic and __underline__ text_"},
 		{
-			"deeply nested preserved",
+			// Bold converts to a single '*'; inner delimiters that cannot
+			// form valid nested spans stay escaped. Balanced MarkdownV2.
+			"deeply nested",
 			"**bold _italic bold ~italic bold strikethrough ||italic boldstrikethrough spoiler||~ __underline italic bold___ bold**",
-			"**bold _italic bold ~italic bold strikethrough ||italic boldstrikethrough spoiler||~ __underline italic bold___ bold**",
+			"*bold \\_italic bold ~italic bold strikethrough ||italic boldstrikethrough spoiler||~ \\_\\_underline italic bold\\_\\_\\_ bold*",
 		},
-		{"italic with strikethrough inside", "\n*Italic with ~~strikethrough~~ inside*", "\n*Italic with ~strikethrough~ inside*"},
+		// Strikethrough nests inside italic, so single '*' becomes italic '_'.
+		{"italic with strikethrough inside", "\n*Italic with ~~strikethrough~~ inside*", "\n_Italic with ~strikethrough~ inside_"},
 
 		{"link", "[link 2](https://google.com)", "[link 2](https://google.com)"},
 		{"link with markdown", "[**bold link**](https://google.com)", "[*bold link*](https://google.com)"},
@@ -66,7 +69,7 @@ func TestConvert(t *testing.T) {
 		{"backslash in code block", "```python\nprint('Hello')\nC:\\test\\```", "```python\nprint('Hello')\nC:\\\\test\\\\\n```"},
 
 		{"code with markdown chars", "`code with * and _`", "`code with * and _`"},
-		{"code block with bold", "```\n**bold in code block**\n```", "```\n**bold in code block**\n\n```"},
+		{"code block with bold", "```\n**bold in code block**\n```", "```\n**bold in code block**\n```"},
 		{"code with backslash and backtick", "`code with \\ and ` backticks`", "`code with \\\\ and \\` backticks`"},
 		{"code with special chars", "`code with ( ) special [.] characters!`", "`code with ( ) special [.] characters!`"},
 
@@ -132,7 +135,7 @@ func TestConvertComplexTextWithCode(t *testing.T) {
 		"    rows, cols = len(maze), len(maze[0])\n" +
 		"    queue = deque([(start, [start])])\n" +
 		"    directions = [(-1,0), (1,0), (0,-1), (0,1)]\n" +
-		"    visited = {start}\n\n" +
+		"    visited = {start}\n" +
 		"```\n" +
 		"\n" +
 		"\\-\\-\\-\n" +
@@ -193,6 +196,178 @@ func TestConvertWordBoundaries(t *testing.T) {
 	}
 }
 
+// One case per finding of the 2026-07-03 review; comments name the defect.
+func TestConvertReviewFixes(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		// Parenthesized URLs survive; ')' inside URLs is escaped.
+		{"wikipedia link", "[Go](https://en.wikipedia.org/wiki/Go_(programming_language))",
+			`[Go](https://en.wikipedia.org/wiki/Go_(programming_language\))`},
+		{"url with backslash", `[t](http://a.com/a\b)`, `[t](http://a.com/a\\b)`},
+
+		// Blockquote matching stays on its own line.
+		{"blockquotes with blank line", "> q1\n\n> q2", ">q1\n\n>q2"},
+		{"blockquote after paragraph", "para\n\n> quote", "para\n\n>quote"},
+		{"empty quote then plain line", ">\nnext line", ">\nnext line"},
+
+		// Flanking: list markers and spaced operators are not emphasis.
+		{"asterisk bullet list", "* first\n* second\n* third", "\\* first\n\\* second\n\\* third"},
+		{"spaced multiplication", "5 * 3 * 2 = 30", `5 \* 3 \* 2 \= 30`},
+		{"spaced exponentiation", "2 ** 3 ** 4", `2 \*\* 3 \*\* 4`},
+
+		// ___x___ nests underline over italic; \r separates each adjacent
+		// underscore run so greedy __ parsing stays balanced.
+		{"bold italic underline", "___both___", "__\r_both_\r__"},
+
+		// Word boundaries for the previously unguarded delimiters.
+		{"intraword tilde", "file~1~2", `file\~1\~2`},
+		{"intraword tilde range", "between 5~6 and 7~8 units", `between 5\~6 and 7\~8 units`},
+		{"intraword double underscore", "snake__case__here", `snake\_\_case\_\_here`},
+		{"logical or in prose", "if a || b || c then", `if a \|\| b \|\| c then`},
+
+		// Escaped underscores stay literal, like escaped asterisks.
+		{"escaped underscores", `\_not italic\_`, `\_not italic\_`},
+
+		// Double-backtick code spans.
+		{"double backtick span", "``x``", "`x`"},
+		{"double backtick padding", "`` x ``", "`x`"},
+
+		// Single-line fenced blocks get spec escaping like multiline ones.
+		{"single line fence backslash", "```C:\\path\\file```", "```\nC:\\\\path\\\\file\n```"},
+		{"single line fence backticks", "```echo `date` now```", "```\necho \\`date\\` now\n```"},
+
+		// Reserved control bytes are stripped, not turned into formatting.
+		{"control bytes stripped", "a\x01b\x03c\x0Ed", "abcd"},
+
+		// Placeholder-like literal text is not corrupted.
+		{"placeholder-like literal", "zxzC0zxz and `code`", "zxzC0zxz and `code`"},
+		{"placeholder-like with links", "zxzL0zxz [a](https://e.com) [b](https://e.com)",
+			"zxzL0zxz [a](https://e.com) [b](https://e.com)"},
+
+		// **…** containing literal underscores is bold, not preserved-literal.
+		{"bold with literal underscores", "**a ___ b**", `*a \_\_\_ b*`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := Convert(tt.in); got != tt.want {
+				t.Errorf("Convert(%q)\n got: %q\nwant: %q", tt.in, got, tt.want)
+			}
+		})
+	}
+}
+
+// Cases from the second-pass adversarial review: nesting and run edge cases
+// whose output must be balanced MarkdownV2.
+func TestConvertNesting(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		// Adjacent underscore runs are separated by \r at every boundary,
+		// so nothing collapses into an ambiguous ___ that Telegram misreads.
+		{"italic wrapping triple underscore", "*___both___*", "_\r__\r_both_\r__\r_"},
+		{"bold wrapping triple underscore", "**bold ___both___ bold**", "*bold __\r_both_\r__ bold*"},
+		{"italic flush with underline", "*__x__*", "_\r__x__\r_"},
+		{"bold italic flush with underline", "***__x__***", "*_\r__x__\r_*"},
+		{"stray underscore runs escape", "____four____", `\_\_\_\_four\_\_\_\_`},
+		{"intraword triple underscore", "snake___case___here", `snake\_\_\_case\_\_\_here`},
+
+		// Word-flanked ** with underline content stays literal (balanced).
+		{"word-flanked bold underline", "a**__b__**c", `a\*\*__b__\*\*c`},
+
+		// Delimiter runs never open a lone span.
+		{"intraword double tilde", "a~~b~~c", `a\~\~b\~\~c`},
+		{"double tilde around word", "word~~strike~~word", `word\~\~strike\~\~word`},
+		{"triple pipe run", "a|||b|||c", `a\|\|\|b\|\|\|c`},
+
+		// Escaped delimiters stay literal on both the opening and closing side.
+		{"escaped italic closer", `_text\_`, `\_text\_`},
+		{"escaped bold closer", `*text\*`, `\*text\*`},
+
+		// A code span (or fenced block) is never re-wrapped or left raw.
+		{"fence inside double backtick", "``a ```x``` b``", "\\`\\`a ```\nx\n``` b\\`\\`"},
+		{"code span in link url", "[x](a`)`b)", "[x](a`\\)`b)"},
+		{"all-space double backtick", "``  ``", "`  `"},
+		// A link whose text is a code span containing ']' is valid tdlib.
+		{"code span with bracket in link text", "[`]`](b)", "[`]`](b)"},
+
+		// Escaped brackets do not form a link.
+		{"escaped brackets", `\[not a link\](url)`, `\[not a link\]\(url\)`},
+
+		// Multiline fence with a 4+ backtick opening normalizes to ```.
+		{"four backtick fence", "````\ncode\n```", "```\ncode\n```"},
+
+		// A '>' in link text is escaped, not turned into a blockquote.
+		{"gt in link text", "[>x](u)", `[\>x](u)`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := Convert(tt.in)
+			if got != tt.want {
+				t.Errorf("Convert(%q)\n got: %q\nwant: %q", tt.in, got, tt.want)
+			}
+			if !validMarkdownV2(got) {
+				t.Errorf("Convert(%q) = %q is not valid MarkdownV2", tt.in, got)
+			}
+		})
+	}
+}
+
+// Deeply malformed input that the multi-pass conversion cannot render as valid
+// MarkdownV2 falls back to fully escaped plain text — always safe to send.
+func TestConvertSafetyNet(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"crossing italic strike", "_~_~", `\_\~\_\~`},
+		{"crossing bold strike", "~**~**", `\~\*\*\~\*\*`},
+		{"crossing underline spoiler", "__||__||", `\_\_\|\|\_\_\|\|`},
+		// Emphasis opened in a blockquote and closed on an unquoted line —
+		// Telegram force-closes the entity at the blockquote-ending newline.
+		{"emphasis crosses blockquote end", ">*a\nb*", "\\>\\*a\nb\\*"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := Convert(tt.in)
+			if got != tt.want {
+				t.Errorf("Convert(%q)\n got: %q\nwant: %q", tt.in, got, tt.want)
+			}
+			if !validMarkdownV2(got) {
+				t.Errorf("fallback for %q is still invalid: %q", tt.in, got)
+			}
+		})
+	}
+}
+
+func TestValidMarkdownV2(t *testing.T) {
+	valid := []string{
+		"", "plain text", "*bold*", "_italic_", "__underline__", "~strike~",
+		"||spoiler||", "*_bi_*", "__\r_both_\r__", "`code`", "```\npre\n```",
+		"[text](http://a.com)", "a\\*b", ">quote", "[x](a`\\)`b)",
+		">a\n>b", "[`]`](b)", // multi-line quote; link text = code span with ]
+	}
+	invalid := []string{
+		"*unclosed", "_~_~", "`unterminated", "[text](url", "a!b", "plain)text",
+		"__underline_", ">*a\nb*", // emphasis crosses blockquote end
+	}
+	for _, s := range valid {
+		if !validMarkdownV2(s) {
+			t.Errorf("validMarkdownV2(%q) = false, want true", s)
+		}
+	}
+	for _, s := range invalid {
+		if validMarkdownV2(s) {
+			t.Errorf("validMarkdownV2(%q) = true, want false", s)
+		}
+	}
+}
+
 func TestEscapeSpecialChars(t *testing.T) {
 	tests := []struct {
 		name string
@@ -246,6 +421,11 @@ func FuzzConvert(f *testing.F) {
 		out := Convert(in) // must not panic or hang
 		if utf8.ValidString(in) && !utf8.ValidString(out) {
 			t.Errorf("Convert(%q) produced invalid UTF-8: %q", in, out)
+		}
+		// Every output must be sendable MarkdownV2 — for well-formed input
+		// directly, and for malformed input via the plain-text fallback.
+		if !validMarkdownV2(out) {
+			t.Errorf("Convert(%q) = %q is not valid MarkdownV2", in, out)
 		}
 	})
 }
