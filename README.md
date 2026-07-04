@@ -7,7 +7,7 @@ A Go library for converting standard Markdown to Telegram's MarkdownV2 format, w
 - ✅ Convert standard Markdown to Telegram MarkdownV2 format
 - ✅ Proper escaping of special characters, without double-escaping
 - ✅ Preserve code blocks and inline code (escaping only what the MarkdownV2 spec requires inside them)
-- ✅ Handle nested markdown formatting
+- ✅ Handle nested and mixed emphasis to any depth — e.g. an italic span inside a bold one, `**bold *italic***` → `*bold _italic_*` (the delimiter passes repeat to a fixpoint, so an outer span resolves once its inner span has)
 - ✅ Support for links, bold, italic, strikethrough, underline, and spoiler text
 - ✅ Word-boundary and flanking rules: list markers (`* item`), spaced operators (`5 * 3`), and intraword delimiters (`snake_case`, `file~1`) stay literal
 - ✅ Link URLs with balanced parentheses (Wikipedia-style) survive intact
@@ -58,6 +58,7 @@ func main() {
 | ------------------------------------- | -------------------------- | -------------------- |
 | `**bold**`                            | `*bold*`                   | Bold text            |
 | `***bold italic***`                   | `*_bold italic_*`          | Bold and italic text |
+| `**bold *italic***`                   | `*bold _italic_*`          | Nested emphasis, any depth |
 | `*italic*` / `_italic_`               | `_italic_`                 | Italic text          |
 | `~~strikethrough~~` / `~strikethrough~` | `~strikethrough~`        | Strikethrough text   |
 | `__underline__`                       | `__underline__`            | Underlined text      |
