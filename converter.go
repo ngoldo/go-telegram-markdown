@@ -444,34 +444,52 @@ func convert(text string, inline bool) string {
 	// Longest delimiters first so ***/___/~~ are not split by the shorter
 	// passes. Telegram nests these freely, so a single conversion is always
 	// valid; the carriage-return disambiguation happens at restore time.
-
-	text = replaceDelimited(text, "***", func(c string) string {
-		return phBold + phItalic + c + phItalic + phBold
-	})
-	text = replaceDelimited(text, "___", func(c string) string {
-		return phUnderline + phItalic + c + phItalic + phUnderline
-	})
-	text = replaceDelimited(text, "__", func(c string) string {
-		return phUnderline + c + phUnderline
-	})
-	text = replaceDelimited(text, "_", func(c string) string {
-		return phItalic + c + phItalic
-	})
-	text = replaceDelimited(text, "~~", func(c string) string {
-		return phStrike + c + phStrike
-	})
-	text = replaceDelimited(text, "~", func(c string) string {
-		return phStrike + c + phStrike
-	})
-	text = replaceDelimited(text, "||", func(c string) string {
-		return phSpoiler + c + phSpoiler
-	})
-	text = replaceDelimited(text, "**", func(c string) string {
-		return phBold + c + phBold
-	})
-	text = replaceDelimited(text, "*", func(c string) string {
-		return phItalic + c + phItalic
-	})
+	//
+	// Repeat the passes to a fixpoint. Same-character nesting — a *italic*
+	// span inside a **bold** span, or vice versa — can't resolve in one
+	// sweep: replaceDelimited abandons a span whose content still holds its
+	// own delimiter char, so the outer span only matches after its inner
+	// span becomes a placeholder. Each conversion replaces delimiters with
+	// non-delimiter placeholder bytes, so the delimiter count strictly
+	// drops and this converges in a couple of iterations. The loop always
+	// exits early via `text == before`; maxEmphasisPasses is only a
+	// belt-and-braces guard against an unforeseen non-converging input,
+	// set well beyond any realistic nesting depth so it never truncates
+	// real formatting (and even if it did, the output stays valid MV2).
+	const maxEmphasisPasses = 32
+	for range maxEmphasisPasses {
+		before := text
+		text = replaceDelimited(text, "***", func(c string) string {
+			return phBold + phItalic + c + phItalic + phBold
+		})
+		text = replaceDelimited(text, "___", func(c string) string {
+			return phUnderline + phItalic + c + phItalic + phUnderline
+		})
+		text = replaceDelimited(text, "__", func(c string) string {
+			return phUnderline + c + phUnderline
+		})
+		text = replaceDelimited(text, "_", func(c string) string {
+			return phItalic + c + phItalic
+		})
+		text = replaceDelimited(text, "~~", func(c string) string {
+			return phStrike + c + phStrike
+		})
+		text = replaceDelimited(text, "~", func(c string) string {
+			return phStrike + c + phStrike
+		})
+		text = replaceDelimited(text, "||", func(c string) string {
+			return phSpoiler + c + phSpoiler
+		})
+		text = replaceDelimited(text, "**", func(c string) string {
+			return phBold + c + phBold
+		})
+		text = replaceDelimited(text, "*", func(c string) string {
+			return phItalic + c + phItalic
+		})
+		if text == before {
+			break
+		}
+	}
 	if !inline {
 		text = blockquoteRe.ReplaceAllString(text, phQuote+"${1}")
 	}

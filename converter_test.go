@@ -40,6 +40,12 @@ func TestConvert(t *testing.T) {
 
 		{"nested bold italic", "**bold and _italic_ text**", "*bold and _italic_ text*"},
 		{"nested italic bold asterisk", "*italic **bold** text*", "_italic *bold* text_"},
+		// The reverse — asterisk *italic* INSIDE asterisk **bold** — is the
+		// case the fixpoint pass fixed (previously the outer ** escaped to
+		// literal because replaceDelimited abandons a span whose content
+		// still holds its own delimiter char).
+		{"nested bold italic asterisk", "**bold *italic* text**", "*bold _italic_ text*"},
+		{"nested bold italic asterisk 2", "**A *nested* combination**", "*A _nested_ combination*"},
 		{"nested italic bold underscore", "_italic **bold** text_", "_italic *bold* text_"},
 		{"triple asterisk", "***bold italic text***", "*_bold italic text_*"},
 		{"nested italic underline", "_italic and __underline__ text_", "_italic and __underline__ text_"},
