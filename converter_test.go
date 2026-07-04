@@ -285,6 +285,15 @@ func TestConvertNesting(t *testing.T) {
 		// Word-flanked ** with underline content stays literal (balanced).
 		{"word-flanked bold underline", "a**__b__**c", `a\*\*__b__\*\*c`},
 
+		// Flush nested emphasis (v0.0.4): the inner span closes flush against
+		// the outer, colliding the delimiters into *** (or ** + *). The inner
+		// closer's trailing run is the enclosing span's closer, not a stray run.
+		{"flush italic in bold", `**a *b***`, `*a _b_*`},
+		{"flush bold in italic", `*a **b***`, `_a *b*_`},
+		{"flush nested mid-string", `x **b *c*** y`, `x *b _c_* y`},
+		{"flush nested (LLM output)", `**secretly *blushing***`, `*secretly _blushing_*`},
+		{"flush nested list item (LLM)", `**Study *hard***`, `*Study _hard_*`},
+
 		// Delimiter runs never open a lone span.
 		{"intraword double tilde", "a~~b~~c", `a\~\~b\~\~c`},
 		{"double tilde around word", "word~~strike~~word", `word\~\~strike\~\~word`},
@@ -337,6 +346,11 @@ func TestConvertSafetyNet(t *testing.T) {
 		// Emphasis opened in a blockquote and closed on an unquoted line —
 		// Telegram force-closes the entity at the blockquote-ending newline.
 		{"emphasis crosses blockquote end", ">*a\nb*", "\\>\\*a\nb\\*"},
+		// Flush-OPENING nested emphasis (adjacent openers, "***bold** rest*") is
+		// a known limitation: only the closing side of the runs rule is relaxed
+		// for nesting (v0.0.4). A symmetric opening relaxation would misparse
+		// stray runs like "a~~b~~c", so this falls back safely instead.
+		{"flush-opening nested emphasis", `***bold** and italic*`, `\*\*\*bold\*\* and italic\*`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

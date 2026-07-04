@@ -226,7 +226,22 @@ func replaceDelimited(text, delim string, repl func(content string) string) stri
 		}
 		if after := j + len(delim); after < len(text) {
 			r, _ := utf8.DecodeRuneInString(text[after:])
-			if blocked(r) {
+			switch {
+			case isWordRune(r):
+				// Flanking: a closer flush against a word character does not
+				// close, so "file~1" and "a**b**c" stay literal.
+				i++
+				continue
+			case r == rune(d) && strings.IndexByte(text[:i], d) < 0:
+				// The closer is followed by a run of its own delimiter char and
+				// no same-delimiter opener precedes this span: the closer is part
+				// of a longer run ("a~~b~~c"), not a nested closer, so it cannot
+				// match. When a same-delimiter opener *does* precede, the trailing
+				// run is an enclosing span's flush closer — "**a *b***" is
+				// bold(a, italic(b)), whose inner *b* closes flush against the
+				// outer ** — so allow the match and let the fixpoint resolve the
+				// outer span. A wrong guess still fails validMarkdownV2 and falls
+				// back to escaped plain text.
 				i++
 				continue
 			}
