@@ -72,11 +72,11 @@ func TestConvert(t *testing.T) {
 		{"backslash trailing", `C:\test\`, `C:\\test\\`},
 		{"forward slashes", "C:/test/", "C:/test/"},
 		{"backslash with dot", `C:\test\file.txt`, `C:\\test\\file\.txt`},
-		{"backslash in code block", "```python\nprint('Hello')\nC:\\test\\```", "```python\nprint('Hello')\nC:\\\\test\\\\\n```"},
+		{"backslash in code block", "```python\nprint('Hello')\nC:\\test\\\n```", "```python\nprint('Hello')\nC:\\\\test\\\\\n```"},
 
 		{"code with markdown chars", "`code with * and _`", "`code with * and _`"},
 		{"code block with bold", "```\n**bold in code block**\n```", "```\n**bold in code block**\n```"},
-		{"code with backslash and backtick", "`code with \\ and ` backticks`", "`code with \\\\ and \\` backticks`"},
+		{"code with backslash and backtick", "``code with \\ and ` backticks``", "`code with \\\\ and \\` backticks`"},
 		{"code with special chars", "`code with ( ) special [.] characters!`", "`code with ( ) special [.] characters!`"},
 
 		{"empty string", "", ""},
@@ -185,6 +185,22 @@ func TestConvertWordBoundaries(t *testing.T) {
 		{"asterisk inside word", "2*3*4", `2\*3\*4`},
 		// Word matching is Unicode-aware: é blocks the word boundary.
 		{"unicode word boundary", "café_test_х", `café\_test\_х`},
+		{"decomposed unicode word boundary", "cafe\u0301_test_", "cafe\u0301\\_test\\_"},
+		{"joiner word boundary", "a\u200D_test_", "a\u200D\\_test\\_"},
+		{"emoji variation selector boundary", "❤️*love*", "❤️_love_"},
+		{"supplementary variation selector boundary", "❤️\U000E0100*love*", "❤️\U000E0100_love_"},
+		{"keycap emoji asterisk boundary", "1️⃣*one*", "1️⃣_one_"},
+		{"asterisk keycap is not emphasis", "*️⃣word*", "\\*️⃣word\\*"},
+		{"asterisk keycap without variation selector is not emphasis", "*\u20E3word*", "\\*\u20E3word\\*"},
+		{"emphasis before asterisk keycap", "**️⃣word*", "_\\*️⃣word_"},
+		{"keycap emoji strike boundary", "1️⃣~one~", "1️⃣~one~"},
+		{"keycap emoji spoiler boundary", "1️⃣||one||", "1️⃣||one||"},
+		{"marked symbol boundary", "☕\u0301*coffee*", "☕\u0301_coffee_"},
+		{"ideographic variation sequence boundary",
+			"字\U000E0100*variant*", "字\U000E0100\\*variant\\*"},
+		{"ideographic variation sequence strike boundary",
+			"字\U000E0100~variant~", "字\U000E0100\\~variant\\~"},
+		{"letter variation sequence boundary", "a\uFE0F*variant*", "a\uFE0F\\*variant\\*"},
 		{"unicode italic", "*привет мир*", "_привет мир_"},
 		// Whitespace matching is Unicode-aware too: exotic whitespace
 		// around '>' still forms a blockquote.
@@ -213,11 +229,59 @@ func TestConvertReviewFixes(t *testing.T) {
 		{"wikipedia link", "[Go](https://en.wikipedia.org/wiki/Go_(programming_language))",
 			`[Go](https://en.wikipedia.org/wiki/Go_(programming_language\))`},
 		{"url with backslash", `[t](http://a.com/a\b)`, `[t](http://a.com/a\\b)`},
+		{"escaped emphasis in link text", `[\*x\*](url)`, `[\*x\*](url)`},
+		{"escaped closing bracket in link text", `[a \] b](url)`, `[a \] b](url)`},
+		{"escaped parenthesis in link URL", `[x](https://example.com/a\)b)`, `[x](https://example.com/a\)b)`},
+		{"nested brackets in link text", `[a [b] c](url)`, `[a \[b\] c](url)`},
+		{"angle-bracket link URL", `[x](<https://example.com/a>)`, `[x](https://example.com/a)`},
+		{"code-looking backticks stay literal in angle URL",
+			"[x](<https://example.com/``ab``>)",
+			"[x](https://example.com/``ab``)"},
+		{"code-looking backticks stay literal in parenthesised URL",
+			"[x](https://example.com/``ab``)",
+			"[x](https://example.com/``ab``)"},
+		{"code-looking URL source decodes escapes once",
+			"[x](<https://example.com/``a\\)b``>)",
+			"[x](https://example.com/``a\\)b``)"},
+		{"URL backtick cannot pair with following prose",
+			"[x](<https://example.com/a`>) tail `z",
+			"[x](https://example.com/a`) tail \\`z"},
+		{"URL double backticks cannot pair with following prose",
+			"[x](<https://example.com/a``>) tail ``z",
+			"[x](https://example.com/a``) tail \\`\\`z"},
+		{"URL legacy fence cannot pair with following prose",
+			"[x](<u/```a>) tail ```z",
+			"[x](u/```a) tail \\`\\`\\`z"},
+		{"raw angle close stays structural inside URL backticks",
+			"[x](<https://e/``>``/tail>)",
+			"\\[x\\]\\(<https://e/`>`/tail\\>\\)"},
+		{"raw parenthesis stays structural inside URL backticks",
+			"[x](https://e/``)``/tail)",
+			"[x](https://e/``)\\`\\`/tail\\)"},
+		{"code in link label still renders", "[``ab``](url)", "[`ab`](url)"},
+		{"link syntax inside code stays code", "`[x](url)`", "`[x](url)`"},
+		{"unsupported image stays literal", `![alt](url)`, `\!\[alt\]\(url\)`},
+		{"literal image before real link", `![alt](image) and [link](url)`,
+			`\!\[alt\]\(image\) and [link](url)`},
+		{"code-looking image punctuation stays literal",
+			"![``alt``](https://example.com/``path``)",
+			"\\!\\[\\`\\`alt\\`\\`\\]\\(https://example\\.com/\\`\\`path\\`\\`\\)"},
+		{"code-looking image inside link label stays literal",
+			"[outer ![``img``](u)](v)",
+			"[outer \\!\\[\\`\\`img\\`\\`\\]\\(u\\)](v)"},
+		{"unclosed image does not suppress nested link",
+			"![broken [real](https://example.com)",
+			"\\!\\[broken [real](https://example.com)"},
+		{"image inside invalid empty link stays literal",
+			"[](![alt](url))",
+			"\\[\\]\\(\\!\\[alt\\]\\(url\\)\\)"},
+		{"escaped image marker permits link", `\![alt](url)`, `\![alt](url)`},
 
 		// Blockquote matching stays on its own line.
 		{"blockquotes with blank line", "> q1\n\n> q2", ">q1\n\n>q2"},
 		{"blockquote after paragraph", "para\n\n> quote", "para\n\n>quote"},
 		{"empty quote then plain line", ">\nnext line", ">\nnext line"},
+		{"lone CR blockquote boundary", "> quote\rplain", ">quote\nplain"},
 
 		// Flanking: list markers and spaced operators are not emphasis.
 		{"asterisk bullet list", "* first\n* second\n* third", "\\* first\n\\* second\n\\* third"},
@@ -293,6 +357,12 @@ func TestConvertNesting(t *testing.T) {
 		{"flush nested mid-string", `x **b *c*** y`, `x *b _c_* y`},
 		{"flush nested (LLM output)", `**secretly *blushing***`, `*secretly _blushing_*`},
 		{"flush nested list item (LLM)", `**Study *hard***`, `*Study _hard_*`},
+		{"flush-opening bold in italic", `***bold** and italic*`, `_*bold* and italic_`},
+		{"flush-opening italic in bold", `***italic* and bold**`, `*_italic_ and bold*`},
+		{"escaped literal inside italic", `*foo \* bar*`, `_foo \* bar_`},
+		{"nested duplicate bold", `****foo****`, `*foo*`},
+		{"nested duplicate bold with shared opener", `****x** y**`, `*x y*`},
+		{"nested duplicate bold inside bold", `**x ****y**** z**`, `*x y z*`},
 
 		// Delimiter runs never open a lone span.
 		{"intraword double tilde", "a~~b~~c", `a\~\~b\~\~c`},
@@ -302,10 +372,15 @@ func TestConvertNesting(t *testing.T) {
 		// Escaped delimiters stay literal on both the opening and closing side.
 		{"escaped italic closer", `_text\_`, `\_text\_`},
 		{"escaped bold closer", `*text\*`, `\*text\*`},
+		{"escaped star before italic opener", `\**foo*`, `\*_foo_`},
+		{"escaped star before bold opener", `\***foo**`, `\**foo*`},
+		{"escaped star before italic closer", `*foo \**`, `_foo \*_`},
+		{"escaped star before bold closer", `**foo \***`, `*foo \**`},
 
 		// A code span (or fenced block) is never re-wrapped or left raw.
 		{"fence inside double backtick", "``a ```x``` b``", "\\`\\`a ```\nx\n``` b\\`\\`"},
-		{"code span in link url", "[x](a`)`b)", "[x](a`\\)`b)"},
+		{"raw parenthesis closes link despite URL backticks",
+			"[x](a`)`b)", "[x](a`)\\`b\\)"},
 		{"all-space double backtick", "``  ``", "`  `"},
 		// A link whose text is a code span containing ']' is valid tdlib.
 		{"code span with bracket in link text", "[`]`](b)", "[`]`](b)"},
@@ -313,8 +388,30 @@ func TestConvertNesting(t *testing.T) {
 		// Escaped brackets do not form a link.
 		{"escaped brackets", `\[not a link\](url)`, `\[not a link\]\(url\)`},
 
-		// Multiline fence with a 4+ backtick opening normalizes to ```.
-		{"four backtick fence", "````\ncode\n```", "```\ncode\n```"},
+		// Multiline fences with 4+ backticks normalise to Telegram's triple
+		// fence while retaining shorter backtick runs as escaped code content.
+		{"four backtick fence", "````\ncode\n````", "```\ncode\n```"},
+		{"four backtick fence with inner triple", "````go\nfmt.Println(\"```\")\n````",
+			"```go\nfmt.Println(\"\\`\\`\\`\")\n```"},
+		{"triple fence does not close after code", "```\nalpha ```\nomega\n```",
+			"```\nalpha \\`\\`\\`\nomega\n```"},
+		{"fence info keeps language only", "``` go title=example\nx\n```", "```go\nx\n```"},
+		{"fence language decodes punctuation escape",
+			"```foo\\+bar\nx\n```", "```foo+bar\nx\n```"},
+		{"unclosed fenced block", "```go\nx", "```go\nx\n```"},
+		{"unclosed quoted fence stops at quote boundary", "> ```go\n> x\noutside",
+			">```go\nx\n```\noutside"},
+		{"escaped literal backticks", "\\`not code\\`", "\\`not code\\`"},
+		{"escaped first backtick leaves code opener", "\\```foo``", "\\``foo`"},
+		{"double backtick contains single", "``code ` tick``", "`code \\` tick`"},
+		{"quoted fenced block", "> ```go\n> fmt.Println(\"hi\")\n> ```",
+			">```go\nfmt.Println(\"hi\")\n```"},
+		{"lone CR fenced block normalises lines",
+			"```go\rfirst\rsecond\r```\rafter",
+			"```go\nfirst\nsecond\n```\nafter"},
+		{"lone CR quoted fence normalises lines",
+			"> ```go\r> x\r> ```\rafter",
+			">```go\nx\n```\nafter"},
 
 		// A '>' in link text is escaped, not turned into a blockquote.
 		{"gt in link text", "[>x](u)", `[\>x](u)`},
@@ -343,14 +440,9 @@ func TestConvertSafetyNet(t *testing.T) {
 		{"crossing italic strike", "_~_~", `\_\~\_\~`},
 		{"crossing bold strike", "~**~**", `\~\*\*\~\*\*`},
 		{"crossing underline spoiler", "__||__||", `\_\_\|\|\_\_\|\|`},
-		// Emphasis opened in a blockquote and closed on an unquoted line —
-		// Telegram force-closes the entity at the blockquote-ending newline.
+		// Emphasis opened in a blockquote and closed on an unquoted line is
+		// rejected at the blockquote-ending newline.
 		{"emphasis crosses blockquote end", ">*a\nb*", "\\>\\*a\nb\\*"},
-		// Flush-OPENING nested emphasis (adjacent openers, "***bold** rest*") is
-		// a known limitation: only the closing side of the runs rule is relaxed
-		// for nesting (v0.0.4). A symmetric opening relaxation would misparse
-		// stray runs like "a~~b~~c", so this falls back safely instead.
-		{"flush-opening nested emphasis", `***bold** and italic*`, `\*\*\*bold\*\* and italic\*`},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -401,6 +493,7 @@ func TestEscapeSpecialChars(t *testing.T) {
 		{"escaped backslash", `\\`, `\\`},
 		{"bare backslash", `a\b`, `a\\b`},
 		{"trailing backslash", `a\`, `a\\`},
+		{"invalid utf8 replaced", string([]byte{0xff}), "\uFFFD"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -408,6 +501,13 @@ func TestEscapeSpecialChars(t *testing.T) {
 				t.Errorf("EscapeSpecialChars(%q) = %q, want %q", tt.in, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestConvertNormalisesInvalidUTF8(t *testing.T) {
+	in := "ok" + string([]byte{0xC0, 0xAF})
+	if got, want := Convert(in), "ok\uFFFD"; got != want {
+		t.Fatalf("Convert(invalid UTF-8) = %q, want %q", got, want)
 	}
 }
 
