@@ -17,7 +17,9 @@ func isolateInlineLinks(text string, store func(linkText, url string) string) st
 		return text
 	}
 
+	codeEnds := codeSpanEnds(text)
 	index := newInlineLinkIndex(text)
+	imageEnds := findImageEnds(text, codeEnds, index)
 	openBrackets := make([]int, 0, 8)
 
 	var out strings.Builder
@@ -25,6 +27,17 @@ func isolateInlineLinks(text string, store func(linkText, url string) string) st
 	changed := false
 
 	for i := 0; i < len(text); i++ {
+		if end := codeEnds[i]; end > i {
+			i = end - 1
+			continue
+		}
+		if end := imageEnds[i]; end > i {
+			// A complete unsupported image is opaque whilst ordinary links
+			// are discovered. If it is inside a real link label, leaving the
+			// outer bracket stack untouched lets that supported link close.
+			i = end - 1
+			continue
+		}
 		if index.escaped[i] {
 			continue
 		}
@@ -40,15 +53,17 @@ func isolateInlineLinks(text string, store func(linkText, url string) string) st
 
 			openBracket := openBrackets[len(openBrackets)-1]
 			openBrackets = openBrackets[:len(openBrackets)-1]
-			if i == openBracket+1 ||
-				i+1 >= len(text) ||
+			if i+1 >= len(text) ||
 				text[i+1] != '(' ||
 				index.escaped[i+1] {
 				continue
 			}
 
 			urlStart, urlEnd, linkEnd, ok := index.destination(text, i+1)
-			if !ok || openBracket < last {
+			if !ok {
+				continue
+			}
+			if i == openBracket+1 || openBracket < last {
 				continue
 			}
 
@@ -63,6 +78,92 @@ func isolateInlineLinks(text string, store func(linkText, url string) string) st
 		}
 	}
 
+	if !changed {
+		return text
+	}
+	out.WriteString(text[last:])
+	return out.String()
+}
+
+// findImageEnds returns each confirmed image's end keyed by the byte offset of
+// its '!'. Code constructs are skipped only when their opener is actually
+// visited, and every confirmed link or image destination is consumed
+// atomically. A backtick inside a destination therefore cannot hide later
+// brackets, while brackets inside real code remain opaque.
+func findImageEnds(text string, codeEnds []int, index inlineLinkIndex) []int {
+	ends := make([]int, len(text))
+	if text == "" || !strings.Contains(text, "![") || !strings.Contains(text, "](") {
+		return ends
+	}
+
+	openBrackets := make([]int, 0, 8)
+	for i := 0; i < len(text); i++ {
+		if end := codeEnds[i]; end > i {
+			i = end - 1
+			continue
+		}
+		if index.escaped[i] {
+			continue
+		}
+
+		switch text[i] {
+		case '[':
+			openBrackets = append(openBrackets, i)
+
+		case ']':
+			if len(openBrackets) == 0 {
+				continue
+			}
+			openBracket := openBrackets[len(openBrackets)-1]
+			openBrackets = openBrackets[:len(openBrackets)-1]
+			if i+1 >= len(text) ||
+				text[i+1] != '(' ||
+				index.escaped[i+1] {
+				continue
+			}
+
+			_, _, constructEnd, ok := index.destination(text, i+1)
+			if !ok {
+				continue
+			}
+			isImage := openBracket > 0 &&
+				text[openBracket-1] == '!' &&
+				!index.escaped[openBracket-1]
+			if isImage {
+				ends[openBracket-1] = constructEnd
+			}
+			if isImage || i != openBracket+1 {
+				i = constructEnd - 1
+			}
+		}
+	}
+	return ends
+}
+
+// isolateImages protects complete images after ordinary links have been
+// isolated. Images are outside the supported dialect, so their exact source is
+// restored later as escaped plain text.
+func isolateImages(text string, store func(source string) string) string {
+	if text == "" || !strings.Contains(text, "![") || !strings.Contains(text, "](") {
+		return text
+	}
+	index := newInlineLinkIndex(text)
+	imageEnds := findImageEnds(text, codeSpanEnds(text), index)
+
+	var out strings.Builder
+	last := 0
+	changed := false
+	for i := 0; i < len(text); i++ {
+		imageEnd := imageEnds[i]
+		if imageEnd <= i {
+			continue
+		}
+		out.WriteString(text[last:i])
+		out.WriteString(store(text[i:imageEnd]))
+		last = imageEnd
+		changed = true
+		i = imageEnd - 1
+	}
 	if !changed {
 		return text
 	}

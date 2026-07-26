@@ -36,6 +36,26 @@ func TestReplaceAsteriskEmphasis(t *testing.T) {
 			phItalic + `foo \* bar` + phItalic,
 		},
 		{
+			"escaped asterisk before italic opener",
+			`\**foo*`,
+			`\*` + phItalic + "foo" + phItalic,
+		},
+		{
+			"escaped asterisk before bold opener",
+			`\***foo**`,
+			`\*` + phBold + "foo" + phBold,
+		},
+		{
+			"escaped asterisk before italic closer",
+			`*foo \**`,
+			phItalic + `foo \*` + phItalic,
+		},
+		{
+			"escaped asterisk before bold closer",
+			`**foo \***`,
+			phBold + `foo \*` + phBold,
+		},
+		{
 			"nested bold is flattened",
 			"****foo****",
 			phBold + "foo" + phBold,
@@ -49,6 +69,13 @@ func TestReplaceAsteriskEmphasis(t *testing.T) {
 		{"spaced operator", "5 * 3 * 2", "5 * 3 * 2"},
 		{"intraword run", "a**b**c", "a**b**c"},
 		{"escaped delimiters", `\*text\*`, `\*text\*`},
+		{"asterisk keycap is literal", "*️⃣word*", "*️⃣word*"},
+		{"asterisk keycap without variation selector is literal", "*\u20E3word*", "*\u20E3word*"},
+		{
+			"delimiter before asterisk keycap remains active",
+			"**️⃣word*",
+			phItalic + "*️⃣word" + phItalic,
+		},
 	}
 
 	for _, tt := range tests {

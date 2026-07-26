@@ -118,6 +118,114 @@ func TestIsolateInlineLinksLeavesMalformedAndEscapedSyntaxAlone(t *testing.T) {
 	}
 }
 
+func TestIsolateInlineLinksLeavesImagesLiteral(t *testing.T) {
+	tests := []string{
+		`![alt](url)`,
+		`before ![alt](url) after`,
+		`![outer [inner](nested)](image)`,
+		`![](foo[x](nested))`,
+	}
+	for _, input := range tests {
+		t.Run(input, func(t *testing.T) {
+			got := isolateInlineLinks(input, func(_, _ string) string {
+				t.Fatal("store called for image syntax")
+				return ""
+			})
+			if got != input {
+				t.Errorf("result = %q, want unchanged %q", got, input)
+			}
+		})
+	}
+}
+
+func TestIsolateInlineLinksAllowsLinkAfterEscapedImageMarker(t *testing.T) {
+	input := `\![alt](url)`
+	got := isolateInlineLinks(input, func(linkText, url string) string {
+		if linkText != "alt" || url != "url" {
+			t.Fatalf("store(%q, %q), want store(%q, %q)", linkText, url, "alt", "url")
+		}
+		return "<stored>"
+	})
+	if want := `\!<stored>`; got != want {
+		t.Errorf("result = %q, want %q", got, want)
+	}
+}
+
+func TestIsolateInlineLinksDoesNotLetUnclosedImageSuppressLink(t *testing.T) {
+	input := `![broken [real](https://example.com)`
+	got := isolateInlineLinks(input, func(linkText, url string) string {
+		if linkText != "real" || url != "https://example.com" {
+			t.Fatalf("store(%q, %q)", linkText, url)
+		}
+		return "<stored>"
+	})
+	if want := `![broken <stored>`; got != want {
+		t.Errorf("result = %q, want %q", got, want)
+	}
+}
+
+func TestIsolateInlineLinksPreservesImageInsideRealLinkLabel(t *testing.T) {
+	input := "[outer ![``img``](u)](v)"
+	got := isolateInlineLinks(input, func(linkText, url string) string {
+		if linkText != "outer ![``img``](u)" || url != "v" {
+			t.Fatalf("store(%q, %q)", linkText, url)
+		}
+		return "<stored>"
+	})
+	if got != "<stored>" {
+		t.Errorf("result = %q, want %q", got, "<stored>")
+	}
+}
+
+func TestIsolateImages(t *testing.T) {
+	tests := []string{
+		`![alt](url)`,
+		`![outer [inner](nested)](image)`,
+		`![](foo[x](nested))`,
+		"![``alt``](https://example.com/``path``)",
+	}
+	for _, input := range tests {
+		t.Run(input, func(t *testing.T) {
+			calls := 0
+			got := isolateImages(input, func(source string) string {
+				calls++
+				if source != input {
+					t.Errorf("source = %q, want %q", source, input)
+				}
+				return "<image>"
+			})
+			if calls != 1 {
+				t.Fatalf("store calls = %d, want 1", calls)
+			}
+			if got != "<image>" {
+				t.Errorf("result = %q, want %q", got, "<image>")
+			}
+		})
+	}
+}
+
+func TestIsolateImagesIgnoresImageSyntaxInsideCode(t *testing.T) {
+	input := "`![alt](url)`"
+	got := isolateImages(input, func(string) string {
+		t.Fatal("store called for image syntax inside code")
+		return ""
+	})
+	if got != input {
+		t.Errorf("result = %q, want unchanged %q", got, input)
+	}
+}
+
+func TestIsolateImagesLeavesEscapedMarkerAlone(t *testing.T) {
+	input := `\![alt](url)`
+	got := isolateImages(input, func(string) string {
+		t.Fatal("store called for escaped image marker")
+		return ""
+	})
+	if got != input {
+		t.Errorf("result = %q, want unchanged %q", got, input)
+	}
+}
+
 func TestIsolateInlineLinksMultiple(t *testing.T) {
 	input := `one [a](u) two [b \]](<v w>) three`
 	var stored []string

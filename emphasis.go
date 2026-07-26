@@ -61,26 +61,44 @@ func replaceAsteriskEmphasis(text string) string {
 		for i < len(text) && text[i] == '*' {
 			i++
 		}
+		end := i
+
+		// The final asterisk in "*\uFE0F\u20E3" (or "*\u20E3") is the
+		// base of a keycap emoji, not an emphasis delimiter. Exclude just
+		// that byte so any preceding asterisks in the same run can still
+		// participate in matching.
+		if asteriskStartsKeycap(text, end-1) {
+			end--
+		}
+
+		// A backslash escapes only the first asterisk in a run. Keep that
+		// byte as literal input, then let any remaining asterisks participate
+		// in delimiter matching.
+		if oddBackslashesBefore(text, start) {
+			start++
+		}
+		if start >= end {
+			continue
+		}
 
 		var before, after rune
 		haveBefore := start > 0
-		haveAfter := i < len(text)
+		haveAfter := end < len(text)
 		if haveBefore {
 			before, _ = utf8.DecodeLastRuneInString(text[:start])
 		}
 		if haveAfter {
-			after, _ = utf8.DecodeRuneInString(text[i:])
+			after, _ = utf8.DecodeRuneInString(text[end:])
 		}
 
-		escaped := oddBackslashesBefore(text, start)
-		canOpen := !escaped && haveAfter && !unicode.IsSpace(after) &&
-			(!haveBefore || !isWordRune(before))
-		canClose := !escaped && haveBefore && !unicode.IsSpace(before) &&
+		canOpen := haveAfter && !unicode.IsSpace(after) &&
+			(!haveBefore || !isWordBefore(text, start))
+		canClose := haveBefore && !unicode.IsSpace(before) &&
 			(!haveAfter || !isWordRune(after))
 
 		runs = append(runs, asteriskRun{
 			start:    start,
-			length:   i - start,
+			length:   end - start,
 			canOpen:  canOpen,
 			canClose: canClose,
 		})
@@ -220,6 +238,25 @@ func replaceAsteriskEmphasis(text string) string {
 	}
 	b.WriteString(text[last:])
 	return b.String()
+}
+
+func asteriskStartsKeycap(text string, pos int) bool {
+	if pos < 0 || pos >= len(text) || text[pos] != '*' {
+		return false
+	}
+	pos++
+	if pos >= len(text) {
+		return false
+	}
+	r, size := utf8.DecodeRuneInString(text[pos:])
+	if r == '\uFE0F' {
+		pos += size
+		if pos >= len(text) {
+			return false
+		}
+		r, _ = utf8.DecodeRuneInString(text[pos:])
+	}
+	return r == '\u20E3'
 }
 
 func suppressNestedAsteriskMatches(matches []asteriskMatch, runs []asteriskRun) {

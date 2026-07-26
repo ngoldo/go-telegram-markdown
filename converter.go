@@ -1,9 +1,9 @@
 // Package tgmarkdown converts a focused Markdown dialect to Telegram-safe
 // MarkdownV2.
 //
-// Code blocks and links are isolated first, formatting is converted through
-// internal placeholders, the remaining special characters are escaped, and
-// everything is restored at the end.
+// Links, unsupported images, and code are structurally isolated first,
+// formatting is converted through internal placeholders, the remaining
+// special characters are escaped, and everything is restored at the end.
 package tgmarkdown
 
 import (
@@ -56,12 +56,32 @@ func isSpecialByte(c byte) bool {
 	return strings.IndexByte(specialChars, c) >= 0
 }
 
-// isWordRune reports whether r continues a word. Marks and join controls are
-// included so canonically equivalent text has the same delimiter boundaries:
-// cafe\u0301_test_ must behave like café_test_.
+// isWordRune reports whether r continues a word when only that rune is
+// available. Marks and join controls are included so right-hand delimiter
+// boundaries stay conservative.
 func isWordRune(r rune) bool {
 	return r == '_' || r == '\u200C' || r == '\u200D' ||
 		unicode.IsLetter(r) || unicode.IsNumber(r) || unicode.IsMark(r)
+}
+
+// isWordBefore classifies the grapheme immediately before pos. Trailing marks,
+// variation selectors, and join controls inherit their base character, so NFD
+// letters and ideographic variation sequences remain word-bound. U+20E3 forms
+// a keycap emoji and therefore remains a symbol boundary even though Unicode
+// categorises it as a mark.
+func isWordBefore(text string, pos int) bool {
+	for pos > 0 {
+		r, size := utf8.DecodeLastRuneInString(text[:pos])
+		if r == '\u20E3' {
+			return false
+		}
+		if unicode.IsMark(r) || r == '\u200C' || r == '\u200D' {
+			pos -= size
+			continue
+		}
+		return r == '_' || unicode.IsLetter(r) || unicode.IsNumber(r)
+	}
+	return false
 }
 
 // oddBackslashesBefore reports whether the byte at pos is preceded by an odd
@@ -91,6 +111,17 @@ func sanitizeControl(text string) string {
 		b.WriteByte(c)
 	}
 	return b.String()
+}
+
+// normaliseLineEndings applies CommonMark's line preprocessing before any
+// structure is scanned. Telegram later discards bare carriage returns, so
+// retaining source CR bytes would collapse code and blockquote lines.
+func normaliseLineEndings(text string) string {
+	if !strings.ContainsRune(text, '\r') {
+		return text
+	}
+	text = strings.ReplaceAll(text, "\r\n", "\n")
+	return strings.ReplaceAll(text, "\r", "\n")
 }
 
 // escapeCode escapes the characters MarkdownV2 requires escaped inside code
@@ -170,8 +201,6 @@ func replaceDelimited(text, delim string, repl func(content string) string) stri
 	if !strings.Contains(text, delim) {
 		return text
 	}
-	blocked := func(r rune) bool { return isWordRune(r) || r == rune(d) }
-
 	var b strings.Builder
 	last, i := 0, 0
 	for i < len(text) {
@@ -181,7 +210,7 @@ func replaceDelimited(text, delim string, repl func(content string) string) stri
 		}
 		if i > 0 {
 			r, _ := utf8.DecodeLastRuneInString(text[:i])
-			if blocked(r) || oddBackslashesBefore(text, i) {
+			if r == rune(d) || isWordBefore(text, i) || oddBackslashesBefore(text, i) {
 				i++
 				continue
 			}
@@ -296,10 +325,11 @@ func restorePlaceholders(text string) string {
 // Convert converts a Markdown string to a Telegram-safe MarkdownV2 string.
 //
 // It works in five passes:
-//  1. Bytes Convert reserves internally are stripped, then code blocks and
-//     links are isolated behind placeholders. Code content keeps only the
-//     escaping the MarkdownV2 spec requires (backslashes and backticks);
-//     link URLs may contain balanced parentheses.
+//  1. Bytes Convert reserves internally are stripped, then links, unsupported
+//     images, and code are isolated behind placeholders. Destinations are
+//     consumed before their literal backticks can pair with surrounding prose.
+//     Code content keeps only the escaping MarkdownV2 requires; link URLs may
+//     contain balanced parentheses.
 //  2. Markdown formatting is rewritten to internal placeholders. Emphasis
 //     needs word boundaries and non-whitespace flanking, so list markers
 //     ("* item") and spaced operators ("5 * 3") stay literal text.
@@ -315,6 +345,7 @@ func restorePlaceholders(text string) string {
 // back to the input escaped as plain text, which is always safe to send.
 func Convert(text string) string {
 	text = strings.ToValidUTF8(text, "\uFFFD")
+	text = normaliseLineEndings(text)
 	text = sanitizeControl(text)
 	if out := convert(text, false); validMarkdownV2(out) {
 		return out
@@ -331,19 +362,29 @@ func convert(text string, inline bool) string {
 	}
 
 	var codeBlocks []string
-	type link struct{ text, url string }
+	type link struct {
+		text, url string
+		literal   string
+	}
 	var links []link
 
-	// --- Pass 1: isolate code blocks and links behind placeholders ---
+	// --- Pass 1: isolate links, images, and code behind placeholders ---
 
-	text = isolateCode(text, func(rendered string) string {
-		codeBlocks = append(codeBlocks, rendered)
-		return codePlaceholder(len(codeBlocks) - 1)
-	})
-
+	// Link discovery uses a code-span skip index without replacing code yet.
+	// Confirmed destinations are therefore consumed atomically: their literal
+	// backticks cannot pair with prose outside the URL, while brackets inside
+	// real code remain opaque.
 	text = isolateInlineLinks(text, func(linkText, url string) string {
 		links = append(links, link{text: linkText, url: url})
 		return linkPlaceholder(len(links) - 1)
+	})
+	text = isolateImages(text, func(source string) string {
+		links = append(links, link{literal: source})
+		return linkPlaceholder(len(links) - 1)
+	})
+	text = isolateCode(text, func(_, rendered string) string {
+		codeBlocks = append(codeBlocks, rendered)
+		return codePlaceholder(len(codeBlocks) - 1)
 	})
 
 	// --- Pass 2: rewrite markdown formatting to placeholders ---
@@ -400,18 +441,16 @@ func convert(text string, inline bool) string {
 	text = restorePlaceholders(text)
 
 	// --- Pass 5: restore links, then code blocks ---
-	// Links go first because their text and URLs may contain code placeholders.
 	// Each placeholder kind is expanded in one indexed pass; repeatedly calling
 	// strings.ReplaceAll here made span-heavy input quadratic.
 	renderedLinks := make([]string, len(links))
 	for i := range links {
-		url := links[i].url
-		// A code span isolated inside the URL would reinsert raw backticks
-		// and parens after escaping; expand it here so its bytes are
-		// escaped as part of the URL instead.
-		if strings.Contains(url, codeOpen) {
-			url = expandIndexedPlaceholders(url, codeOpen[0], codeClose[0], codeBlocks)
+		if links[i].literal != "" {
+			renderedLinks[i] = escapeSpecialChars(links[i].literal)
+			continue
 		}
+
+		url := links[i].url
 		url = strings.ReplaceAll(url, `\`, `\\`)
 		url = strings.ReplaceAll(url, ")", `\)`)
 		renderedLinks[i] = "[" + convert(links[i].text, true) + "](" + url + ")"

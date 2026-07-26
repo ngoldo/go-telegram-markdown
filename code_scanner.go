@@ -14,23 +14,24 @@ const (
 	scannerFenceClose = "\x08"
 )
 
-// isolateCode replaces fenced blocks and inline code spans with values
-// returned by store. The callback receives code already normalised for
-// Telegram MarkdownV2: fenced blocks use triple-backtick delimiters, inline
-// spans use single-backtick delimiters, and their content is escaped with
-// escapeCode.
+// isolateCode replaces fenced blocks and inline code spans with values returned
+// by store. The callback receives both the exact source delimiter span and code
+// normalised for Telegram MarkdownV2: fenced blocks use triple-backtick
+// delimiters, inline spans use single-backtick delimiters, and their content is
+// escaped with escapeCode. The exact source form also supports the
+// index-preserving syntax view used while links and images are discovered.
 //
 // The caller must invoke sanitizeControl first, and store must return an
 // opaque, backtick-free placeholder. Fenced blocks are collected before
 // inline spans so an inline delimiter pair cannot consume a fenced block.
-func isolateCode(text string, store func(rendered string) string) string {
+func isolateCode(text string, store func(source, rendered string) string) string {
 	if text == "" {
 		return text
 	}
 
 	var fencedPlaceholders []string
-	text = isolateFencedCode(text, func(rendered string) string {
-		fencedPlaceholders = append(fencedPlaceholders, store(rendered))
+	text = isolateFencedCode(text, func(source, rendered string) string {
+		fencedPlaceholders = append(fencedPlaceholders, store(source, rendered))
 		return scannerFencePlaceholder(len(fencedPlaceholders) - 1)
 	})
 	text = isolateInlineCode(text, store)
@@ -38,6 +39,41 @@ func isolateCode(text string, store func(rendered string) string) string {
 		return text
 	}
 	return restoreScannerFencePlaceholders(text, fencedPlaceholders)
+}
+
+// codeSpanEnds returns the byte immediately after each code construct keyed by
+// its source opener. Callers use it as a skip index whilst discovering links
+// and images: a code opener that is actually visited hides its contents, while
+// an opener inside an already-consumed destination cannot affect later text.
+//
+// Convert strips phBold from user input before reaching this helper. Replacing
+// every isolated source span with the same number of phBold bytes therefore
+// gives an unambiguous, index-preserving syntax mask.
+func codeSpanEnds(text string) []int {
+	ends := make([]int, len(text))
+	if !strings.ContainsRune(text, '`') {
+		return ends
+	}
+	masked := isolateCode(text, func(source, _ string) string {
+		return strings.Repeat(phBold, len(source))
+	})
+	if len(masked) != len(text) {
+		return ends
+	}
+
+	for i := 0; i < len(masked); {
+		if masked[i] != phBold[0] {
+			i++
+			continue
+		}
+		end := i + 1
+		for end < len(masked) && masked[end] == phBold[0] {
+			end++
+		}
+		ends[i] = end
+		i = end
+	}
+	return ends
 }
 
 type fencedCodeMatch struct {
@@ -50,13 +86,21 @@ type fencedCodeMatch struct {
 // must be on its own line and contain at least as many backticks as the
 // opening fence. For backwards compatibility, an unescaped pair of exactly
 // three backtick runs on one line is also treated as a fenced block.
-func isolateFencedCode(text string, store func(rendered string) string) string {
+func isolateFencedCode(text string, store func(source, rendered string) string) string {
 	var b strings.Builder
 	last := 0
 	lineStart := 0
 	changed := false
 
 	for i := 0; i < len(text); {
+		if text[i] == '\r' {
+			i++
+			if i < len(text) && text[i] == '\n' {
+				i++
+			}
+			lineStart = i
+			continue
+		}
 		if text[i] == '\n' {
 			i++
 			lineStart = i
@@ -88,7 +132,7 @@ func isolateFencedCode(text string, store func(rendered string) string) string {
 		}
 
 		b.WriteString(text[last:i])
-		b.WriteString(store(match.rendered))
+		b.WriteString(store(text[i:match.end], match.rendered))
 		last = match.end
 		i = match.end
 		changed = true
@@ -110,18 +154,8 @@ func matchMultilineFence(text string, lineStart, tickStart, runEnd int) (fencedC
 		return fencedCodeMatch{}, false
 	}
 
-	hasOpeningNewline := true
-	openLineEndRel := strings.IndexByte(text[runEnd:], '\n')
-	if openLineEndRel < 0 {
-		hasOpeningNewline = false
-		openLineEndRel = len(text) - runEnd
-	}
-	openLineEnd := runEnd + openLineEndRel
-	infoEnd := openLineEnd
-	if infoEnd > runEnd && text[infoEnd-1] == '\r' {
-		infoEnd--
-	}
-	info := text[runEnd:infoEnd]
+	openLineEnd, nextLine, hasOpeningNewline := sourceLineBounds(text, runEnd)
+	info := text[runEnd:openLineEnd]
 	// Backticks are forbidden in the info string. Without this guard a later
 	// run on the opening line could be mistaken for code content.
 	if strings.ContainsRune(info, '`') {
@@ -137,23 +171,14 @@ func matchMultilineFence(text string, lineStart, tickStart, runEnd int) (fencedC
 
 	openRunLen := runEnd - tickStart
 	var content strings.Builder
-	cursor := openLineEnd + 1
+	cursor := nextLine
 	for cursor < len(text) {
-		lineEnd := len(text)
-		nextLine := len(text)
-		if rel := strings.IndexByte(text[cursor:], '\n'); rel >= 0 {
-			lineEnd = cursor + rel
-			nextLine = lineEnd + 1
-		}
-		syntaxEnd := lineEnd
-		if syntaxEnd > cursor && text[syntaxEnd-1] == '\r' {
-			syntaxEnd--
-		}
+		lineEnd, nextLine, _ := sourceLineBounds(text, cursor)
 
 		bodyStart := cursor
 		hadQuote := false
 		if quoted {
-			bodyStart, hadQuote = stripStructuralQuotePrefix(text, cursor, syntaxEnd)
+			bodyStart, hadQuote = stripStructuralQuotePrefix(text, cursor, lineEnd)
 		}
 		if quoted && !hadQuote {
 			// A fenced block inside a blockquote ends when the quote does. A
@@ -165,6 +190,8 @@ func matchMultilineFence(text string, lineStart, tickStart, runEnd int) (fencedC
 				if end > 0 && text[end-1] == '\r' {
 					end--
 				}
+			} else if end > 0 && text[end-1] == '\r' {
+				end--
 			}
 			return fencedCodeMatch{
 				end:      end,
@@ -172,7 +199,7 @@ func matchMultilineFence(text string, lineStart, tickStart, runEnd int) (fencedC
 			}, true
 		}
 		if !quoted || hadQuote {
-			if closeEnd, isClose := closingFenceEnd(text, bodyStart, syntaxEnd, openRunLen); isClose {
+			if closeEnd, isClose := closingFenceEnd(text, bodyStart, lineEnd, openRunLen); isClose {
 				return fencedCodeMatch{
 					end:      closeEnd,
 					rendered: renderFencedCode(info, content.String()),
@@ -216,7 +243,26 @@ func fencedCodeLanguage(info string) string {
 	if len(fields) == 0 {
 		return ""
 	}
-	return fields[0]
+	return decodeCommonMarkEscapes(fields[0])
+}
+
+// sourceLineBounds returns the content end and the byte immediately after the
+// line ending at or after start. CommonMark treats CR, LF, and CRLF as line
+// endings; callers retain the original bytes when copying code content.
+func sourceLineBounds(text string, start int) (lineEnd, nextLine int, hasEnding bool) {
+	for i := start; i < len(text); i++ {
+		switch text[i] {
+		case '\r':
+			next := i + 1
+			if next < len(text) && text[next] == '\n' {
+				next++
+			}
+			return i, next, true
+		case '\n':
+			return i, i + 1, true
+		}
+	}
+	return len(text), len(text), false
 }
 
 // fenceOpeningPrefix reports whether a backtick run is in a valid opening
@@ -284,10 +330,7 @@ func closingFenceEnd(text string, lineStart, lineEnd, minimumRun int) (int, bool
 }
 
 func matchLegacySingleLineFence(text string, tickStart, runEnd int) (fencedCodeMatch, bool) {
-	lineEnd := len(text)
-	if rel := strings.IndexByte(text[runEnd:], '\n'); rel >= 0 {
-		lineEnd = runEnd + rel
-	}
+	lineEnd, _, _ := sourceLineBounds(text, runEnd)
 	for i := runEnd; i < lineEnd; {
 		if text[i] != '`' {
 			i++
@@ -308,20 +351,40 @@ func matchLegacySingleLineFence(text string, tickStart, runEnd int) (fencedCodeM
 // isolateInlineCode pairs unescaped opening backtick runs with the next run of
 // exactly the same length. Runs of other lengths remain content, so a
 // two-backtick span can safely contain a single backtick.
-func isolateInlineCode(text string, store func(rendered string) string) string {
+func isolateInlineCode(text string, store func(source, rendered string) string) string {
 	type run struct {
-		start int
-		end   int
+		start           int
+		end             int
+		openerStart     int
+		protectedBefore int
 	}
 
 	var runs []run
+	protectedCount := 0
 	for i := 0; i < len(text); {
 		if text[i] != '`' {
+			if isCodePlaceholderByte(text[i]) {
+				protectedCount++
+			}
 			i++
 			continue
 		}
 		end := backtickRunEnd(text, i)
-		runs = append(runs, run{start: i, end: end})
+		openerStart := i
+		if oddBackslashesBefore(text, openerStart) {
+			// CommonMark escapes only the first punctuation byte. Keep that
+			// backtick literal while allowing the rest of the contiguous run
+			// to open a code span. The physical run is retained because a
+			// backslash inside an existing code span is literal, so the full
+			// run can still close that span.
+			openerStart++
+		}
+		runs = append(runs, run{
+			start:           i,
+			end:             end,
+			openerStart:     openerStart,
+			protectedBefore: protectedCount,
+		})
 		i = end
 	}
 	if len(runs) == 0 {
@@ -334,13 +397,16 @@ func isolateInlineCode(text string, store func(rendered string) string) string {
 	nextSameLength := make([]int, len(runs))
 	nextByLength := make(map[int]int)
 	for i := len(runs) - 1; i >= 0; i-- {
-		length := runs[i].end - runs[i].start
-		next, ok := nextByLength[length]
-		if !ok {
-			next = -1
+		openerLength := runs[i].end - runs[i].openerStart
+		next := -1
+		if openerLength > 0 {
+			if candidate, ok := nextByLength[openerLength]; ok {
+				next = candidate
+			}
 		}
 		nextSameLength[i] = next
-		nextByLength[length] = i
+		physicalLength := runs[i].end - runs[i].start
+		nextByLength[physicalLength] = i
 	}
 
 	var b strings.Builder
@@ -349,7 +415,7 @@ func isolateInlineCode(text string, store func(rendered string) string) string {
 
 	for runIndex := 0; runIndex < len(runs); {
 		opener := runs[runIndex]
-		if oddBackslashesBefore(text, opener.start) {
+		if opener.openerStart == opener.end {
 			runIndex++
 			continue
 		}
@@ -361,16 +427,20 @@ func isolateInlineCode(text string, store func(rendered string) string) string {
 		}
 		closer := runs[closeIndex]
 		content := text[opener.end:closer.start]
-		if strings.ContainsAny(content, scannerFenceOpen+scannerFenceClose) {
+		if opener.protectedBefore != closer.protectedBefore {
 			// A fenced block has precedence over an enclosing inline-looking
-			// pair. Leave the opener literal and continue after it.
+			// pair. Link and code placeholders are likewise already-resolved
+			// syntax. Leave the opener literal and continue after it.
 			runIndex++
 			continue
 		}
 		content = trimCodeSpanPadding(content)
 
-		b.WriteString(text[last:opener.start])
-		b.WriteString(store("`" + escapeCode(content) + "`"))
+		b.WriteString(text[last:opener.openerStart])
+		b.WriteString(store(
+			text[opener.openerStart:closer.end],
+			"`"+escapeCode(content)+"`",
+		))
 		last = closer.end
 		runIndex = closeIndex + 1
 		changed = true
@@ -381,6 +451,12 @@ func isolateInlineCode(text string, store func(rendered string) string) string {
 	}
 	b.WriteString(text[last:])
 	return b.String()
+}
+
+func isCodePlaceholderByte(c byte) bool {
+	return c == scannerFenceOpen[0] || c == scannerFenceClose[0] ||
+		c == codeOpen[0] || c == codeClose[0] ||
+		c == linkOpen[0] || c == linkClose[0]
 }
 
 func backtickRunEnd(text string, start int) int {
