@@ -1,18 +1,26 @@
 package tgmarkdown
 
-import "strings"
+import (
+	"strconv"
+	"strings"
+	"unicode/utf8"
+)
 
 // validMarkdownV2 reports whether s would be accepted by Telegram's MarkdownV2
 // parser. It is a faithful port of the accept/reject decision of tdlib's
 // parse_markdown_v2 (the reference implementation Telegram uses): the same
 // escape handling, the same greedy __ grouping, the same reserved-character
-// rules, blockquotes that end at a newline and force-close open inline
-// entities, and link/pre/code termination. Entity output and the drop-empty
-// logic are omitted because they never cause a rejection.
+// rules, blockquote line boundaries, and link/pre/code termination. Entity
+// output and the drop-empty logic are omitted because they never cause a
+// rejection.
 //
 // It is the gate for Convert's safety net, so it must not reject the library's
 // own well-formed output nor accept anything Telegram would 400 on.
 func validMarkdownV2(s string) bool {
+	if !utf8.ValidString(s) {
+		return false
+	}
+
 	type frame struct {
 		typ        string
 		byteOffset int
@@ -21,6 +29,7 @@ func validMarkdownV2(s string) bool {
 	haveBlockquote := false
 	canStartBlockquote := true
 	resultSize := 0
+	var lastResultByte byte
 	n := len(s)
 
 	for i := 0; i < n; {
@@ -29,6 +38,7 @@ func validMarkdownV2(s string) bool {
 			i++
 			nx := s[i]
 			resultSize++
+			lastResultByte = nx
 			if nx != '\r' {
 				canStartBlockquote = nx == '\n'
 			}
@@ -50,6 +60,7 @@ func validMarkdownV2(s string) bool {
 				}
 			}
 			resultSize++
+			lastResultByte = c
 			i++
 			continue
 		}
@@ -70,6 +81,8 @@ func validMarkdownV2(s string) bool {
 					isEnd = c == '`' && i+2 < n && s[i+1] == '`' && s[i+2] == '`'
 				case "texturl":
 					isEnd = c == ']'
+				case "customemoji":
+					isEnd = c == ']'
 				case "underline":
 					isEnd = c == '_' && i+1 < n && s[i+1] == '_'
 				case "strike":
@@ -84,6 +97,7 @@ func validMarkdownV2(s string) bool {
 
 		if !isEnd {
 			var typ string
+			entityByteOffset := i
 			switch c {
 			case '_':
 				if i+1 < n && s[i+1] == '_' {
@@ -137,6 +151,7 @@ func validMarkdownV2(s string) bool {
 				}
 			case '\n':
 				resultSize++
+				lastResultByte = '\n'
 				canStartBlockquote = true
 				i++
 				continue
@@ -154,7 +169,7 @@ func validMarkdownV2(s string) bool {
 			default:
 				return false
 			}
-			stack = append(stack, frame{typ, i})
+			stack = append(stack, frame{typ, entityByteOffset})
 			i++
 			continue
 		}
@@ -164,7 +179,7 @@ func validMarkdownV2(s string) bool {
 		typ := top.typ
 		if c == '\n' && typ != "blockquote" {
 			spoilerOK := typ == "spoiler" && (top.byteOffset == i-2 ||
-				(top.byteOffset == i-3 && resultSize != 0 && s[resultSize-1] == '\r'))
+				(top.byteOffset == i-3 && resultSize != 0 && lastResultByte == '\r'))
 			if !spoilerOK {
 				return false
 			}
@@ -198,29 +213,124 @@ func validMarkdownV2(s string) bool {
 				return false
 			}
 			i += 2
+			var url strings.Builder
 			for i < n && s[i] != ')' {
 				if s[i] == '\\' && i+1 < n && s[i+1] > 0 && s[i+1] <= 126 {
+					url.WriteByte(s[i+1])
 					i += 2
 					continue
 				}
+				url.WriteByte(s[i])
 				i++
 			}
 			if i >= n || s[i] != ')' {
 				return false
 			}
+			if !validTelegramCustomEntityURL(url.String()) {
+				return false
+			}
 		case "blockquote":
 			haveBlockquote = false
 			resultSize++
+			lastResultByte = c
 			canStartBlockquote = true
 		}
 		stack = stack[:len(stack)-1]
 		i++
 	}
 
-	if haveBlockquote && len(stack) > 0 && stack[len(stack)-1].typ == "blockquote" {
-		stack = stack[:len(stack)-1]
+	if haveBlockquote && len(stack) > 0 {
+		if stack[len(stack)-1].typ == "spoiler" && stack[len(stack)-1].byteOffset == n-2 {
+			stack = stack[:len(stack)-1]
+		}
+		if len(stack) > 0 && stack[len(stack)-1].typ == "blockquote" {
+			stack = stack[:len(stack)-1]
+		}
 	}
 	return len(stack) == 0
+}
+
+func validTelegramCustomEntityURL(rawURL string) bool {
+	if query, ok := telegramEntityQuery(rawURL, "emoji"); ok {
+		for _, parameter := range strings.Split(query, "&") {
+			key, value, _ := strings.Cut(parameter, "=")
+			if key == "id" {
+				id, ok := parseTDLibInteger(value, 64)
+				return ok && id != 0
+			}
+		}
+		return false
+	}
+
+	query, ok := telegramEntityQuery(rawURL, "time")
+	if !ok {
+		return false
+	}
+
+	var unixTime int64
+	format := ""
+	for _, parameter := range strings.Split(query, "&") {
+		key, value, _ := strings.Cut(parameter, "=")
+		switch key {
+		case "unix":
+			parsed, parsedOK := parseTDLibInteger(value, 32)
+			if !parsedOK || parsed <= 0 {
+				return false
+			}
+			unixTime = parsed
+		case "format":
+			format = value
+		}
+	}
+	return unixTime > 0 && validTelegramTimeFormat(format)
+}
+
+func telegramEntityQuery(rawURL, host string) (string, bool) {
+	if len(rawURL) < len("tg:") || !strings.EqualFold(rawURL[:len("tg:")], "tg:") {
+		return "", false
+	}
+	rest := rawURL[len("tg:"):]
+	if strings.HasPrefix(rest, "//") {
+		rest = rest[2:]
+	}
+	if len(rest) < len(host) || !strings.EqualFold(rest[:len(host)], host) {
+		return "", false
+	}
+	rest = rest[len(host):]
+	if len(rest) > 0 && !strings.ContainsRune("/?#", rune(rest[0])) {
+		return "", false
+	}
+	if strings.HasPrefix(rest, "/") {
+		rest = rest[1:]
+	}
+	if !strings.HasPrefix(rest, "?") {
+		return "", false
+	}
+	query := rest[1:]
+	if fragment := strings.IndexByte(query, '#'); fragment >= 0 {
+		query = query[:fragment]
+	}
+	return query, true
+}
+
+func parseTDLibInteger(value string, bitSize int) (int64, bool) {
+	parsed, err := strconv.ParseInt(value, 10, bitSize)
+	if err != nil || strconv.FormatInt(parsed, 10) != value {
+		return 0, false
+	}
+	return parsed, true
+}
+
+func validTelegramTimeFormat(format string) bool {
+	if format == "r" || format == "R" {
+		return true
+	}
+	for _, c := range format {
+		if !strings.ContainsRune("tTdDwW", c) {
+			return false
+		}
+	}
+	return true
 }
 
 func isASCIISpace(c byte) bool {

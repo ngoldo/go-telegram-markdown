@@ -1,4 +1,5 @@
-// Package tgmarkdown converts standard Markdown to Telegram-safe MarkdownV2.
+// Package tgmarkdown converts a focused Markdown dialect to Telegram-safe
+// MarkdownV2.
 //
 // Code blocks and links are isolated first, formatting is converted through
 // internal placeholders, the remaining special characters are escaped, and
@@ -42,14 +43,6 @@ const (
 const strippedControl = "\x01\x02\x03\x04\x05\x06\x07\x08\x0E\x0F\x10\x11"
 
 var (
-	multilineCodeRe = regexp.MustCompile("(?s)```.*?```")
-	// Double-backtick spans: content holds no backtick and no placeholder
-	// byte, so a fenced-block placeholder is never swallowed.
-	doubleBacktickRe = regexp.MustCompile("``([^`" + codeOpen + codeClose + linkOpen + linkClose + "]+?)``")
-	// Inline-code content excludes the code-placeholder bytes so an already
-	// isolated fenced block is never re-wrapped in a code span.
-	specialInlineCodeRe = regexp.MustCompile("`([^`" + codeOpen + codeClose + "]*` +[\\p{L}\\p{N}_]+)`")
-	inlineCodeRe        = regexp.MustCompile("`([^`" + codeOpen + codeClose + "]+?)`")
 	// RE2's \s is ASCII-only; the class below also covers Unicode
 	// whitespace, minus \n so a match can never leave its own line
 	// (which would merge adjacent blockquotes or swallow blank lines).
@@ -63,10 +56,12 @@ func isSpecialByte(c byte) bool {
 	return strings.IndexByte(specialChars, c) >= 0
 }
 
-// isWordRune reports whether r is a word character (a Unicode letter or
-// number, or an underscore) — the Unicode-aware equivalent of \w.
+// isWordRune reports whether r continues a word. Marks and join controls are
+// included so canonically equivalent text has the same delimiter boundaries:
+// cafe\u0301_test_ must behave like café_test_.
 func isWordRune(r rune) bool {
-	return r == '_' || unicode.IsLetter(r) || unicode.IsNumber(r)
+	return r == '_' || r == '\u200C' || r == '\u200D' ||
+		unicode.IsLetter(r) || unicode.IsNumber(r) || unicode.IsMark(r)
 }
 
 // oddBackslashesBefore reports whether the byte at pos is preceded by an odd
@@ -108,6 +103,12 @@ func escapeCode(s string) string {
 // EscapeSpecialChars escapes MarkdownV2 special characters in text without
 // double-escaping sequences that are already escaped.
 func EscapeSpecialChars(text string) string {
+	return escapeSpecialChars(strings.ToValidUTF8(text, "\uFFFD"))
+}
+
+// escapeSpecialChars is the internal fast path. Convert normalises UTF-8 once
+// at its public boundary, so recursive conversion does not need to rescan it.
+func escapeSpecialChars(text string) string {
 	if !strings.ContainsAny(text, specialChars+`\`) {
 		return text
 	}
@@ -143,30 +144,6 @@ func EscapeSpecialChars(text string) string {
 	return b.String()
 }
 
-// replaceAllSubmatchFunc is regexp.ReplaceAllStringFunc with access to
-// capture groups: repl receives the full match followed by each group.
-func replaceAllSubmatchFunc(re *regexp.Regexp, s string, repl func(groups []string) string) string {
-	matches := re.FindAllStringSubmatchIndex(s, -1)
-	if matches == nil {
-		return s
-	}
-	var b strings.Builder
-	last := 0
-	for _, m := range matches {
-		groups := make([]string, len(m)/2)
-		for g := range groups {
-			if m[2*g] >= 0 {
-				groups[g] = s[m[2*g]:m[2*g+1]]
-			}
-		}
-		b.WriteString(s[last:m[0]])
-		b.WriteString(repl(groups))
-		last = m[1]
-	}
-	b.WriteString(s[last:])
-	return b.String()
-}
-
 // replaceDelimited rewrites emphasis spans delimited by delim — a run of one
 // repeated ASCII character d — emulating the pattern
 //
@@ -184,9 +161,10 @@ func replaceAllSubmatchFunc(re *regexp.Regexp, s string, repl func(groups []stri
 //     (e.g. the stray tildes in "a~~b~~c" or the pipes in "a|||b|||c") and does
 //     not match, so half of a run never opens a lone span.
 //
-// Content may not contain d, so the first d after the opener must begin a
-// valid closing delimiter or the opener is abandoned. Failed candidates
-// advance by one position, like a regex engine's scan.
+// Escaped delimiter bytes and shorter runs may remain literal content, so the
+// closer search advances past them to the next complete unescaped candidate.
+// Failed opener candidates advance by one position, like a regex engine's
+// scan.
 func replaceDelimited(text, delim string, repl func(content string) string) string {
 	d := delim[0]
 	if !strings.Contains(text, delim) {
@@ -208,16 +186,25 @@ func replaceDelimited(text, delim string, repl func(content string) string) stri
 				continue
 			}
 		}
-		rel := strings.IndexByte(text[i+len(delim):], d)
-		if rel < 0 {
-			break // no delimiter char remains anywhere
+		search := i + len(delim)
+		j := -1
+		for search < len(text) {
+			rel := strings.IndexByte(text[search:], d)
+			if rel < 0 {
+				break
+			}
+			candidate := search + rel
+			if strings.HasPrefix(text[candidate:], delim) &&
+				!oddBackslashesBefore(text, candidate) {
+				j = candidate
+				break
+			}
+			// An escaped delimiter is literal content, not proof that the
+			// opener has no later closer: *foo \* bar* must keep looking.
+			search = candidate + 1
 		}
-		j := rel + i + len(delim)
-		if !strings.HasPrefix(text[j:], delim) || oddBackslashesBefore(text, j) {
-			// The only candidate closer is escaped or malformed, and
-			// content may not contain d, so this opener cannot match.
-			i++
-			continue
+		if j < 0 {
+			break // no delimiter char remains anywhere
 		}
 		content := text[i+len(delim) : j]
 		if content == "" {
@@ -255,57 +242,6 @@ func replaceDelimited(text, delim string, repl func(content string) string) stri
 		b.WriteString(text[last:i])
 		b.WriteString(repl(content))
 		i = j + len(delim)
-		last = i
-	}
-	if last == 0 {
-		return text
-	}
-	b.WriteString(text[last:])
-	return b.String()
-}
-
-// isolateLinks replaces every [text](url) with the string returned by store.
-// The text part may not contain ']'; the url part may contain balanced
-// parentheses and ends at the ')' matching the opening one, so Wikipedia-style
-// URLs survive intact. A '[' escaped with a backslash is left literal.
-func isolateLinks(text string, store func(linkText, url string) string) string {
-	if !strings.Contains(text, "](") {
-		return text
-	}
-	var b strings.Builder
-	last, i := 0, 0
-	for i < len(text) {
-		if text[i] != '[' || oddBackslashesBefore(text, i) {
-			i++
-			continue
-		}
-		closeBracket := strings.IndexByte(text[i+1:], ']')
-		if closeBracket < 0 {
-			break
-		}
-		closeBracket += i + 1
-		if closeBracket == i+1 || closeBracket+1 >= len(text) || text[closeBracket+1] != '(' {
-			i++
-			continue
-		}
-		depth := 1
-		j := closeBracket + 2
-		for j < len(text) && depth > 0 {
-			switch text[j] {
-			case '(':
-				depth++
-			case ')':
-				depth--
-			}
-			j++
-		}
-		if depth != 0 || j-1 == closeBracket+2 {
-			i++
-			continue
-		}
-		b.WriteString(text[last:i])
-		b.WriteString(store(text[i+1:closeBracket], text[closeBracket+2:j-1]))
-		i = j
 		last = i
 	}
 	if last == 0 {
@@ -378,15 +314,16 @@ func restorePlaceholders(text string) string {
 // conversion; rather than emit output Telegram would reject, Convert falls
 // back to the input escaped as plain text, which is always safe to send.
 func Convert(text string) string {
+	text = strings.ToValidUTF8(text, "\uFFFD")
 	text = sanitizeControl(text)
 	if out := convert(text, false); validMarkdownV2(out) {
 		return out
 	}
-	return EscapeSpecialChars(text)
+	return escapeSpecialChars(text)
 }
 
 // convert runs the five passes. When inline is true (converting link text)
-// blockquotes are not recognized — a link's text is an inline context, and a
+// blockquotes are not recognised — a link's text is an inline context, and a
 // '>' there is a reserved character that must stay escaped, not a quote.
 func convert(text string, inline bool) string {
 	if text == "" {
@@ -399,66 +336,22 @@ func convert(text string, inline bool) string {
 
 	// --- Pass 1: isolate code blocks and links behind placeholders ---
 
-	text = replaceAllSubmatchFunc(multilineCodeRe, text, func(groups []string) string {
-		content := groups[0]
-		var reconstructed string
-		if firstNL := strings.IndexByte(content, '\n'); firstNL >= 0 {
-			// ```lang on the opening line, code content after it. The
-			// match always ends with the closing fence. Normalize the
-			// opening fence to exactly ``` plus a backtick-free info
-			// string; surplus backticks would open a nested code entity
-			// inside the pre block and leave it unterminated.
-			info := strings.ReplaceAll(strings.TrimLeft(content[:firstNL], "`"), "`", "")
-			rest := content[firstNL+1:]
-			escaped := escapeCode(rest[:len(rest)-3])
-			if escaped != "" && !strings.HasSuffix(escaped, "\n") {
-				escaped += "\n"
-			}
-			reconstructed = "```" + info + "\n" + escaped + "```"
-		} else {
-			// Single-line block: split the fences onto their own lines.
-			reconstructed = "```\n" + escapeCode(content[3:len(content)-3]) + "\n```"
-		}
-		codeBlocks = append(codeBlocks, reconstructed)
+	text = isolateCode(text, func(rendered string) string {
+		codeBlocks = append(codeBlocks, rendered)
 		return codePlaceholder(len(codeBlocks) - 1)
 	})
 
-	// Double-backtick code spans: ``x`` means a code span containing x.
-	text = replaceAllSubmatchFunc(doubleBacktickRe, text, func(groups []string) string {
-		content := groups[1]
-		// A single leading and trailing space is padding, not content —
-		// but only when something other than spaces remains.
-		if len(content) >= 2 && content[0] == ' ' && content[len(content)-1] == ' ' &&
-			strings.TrimRight(content, " ") != "" {
-			content = content[1 : len(content)-1]
-		}
-		codeBlocks = append(codeBlocks, "`"+escapeCode(content)+"`")
-		return codePlaceholder(len(codeBlocks) - 1)
-	})
-
-	// Inline code whose content itself contains a backtick, e.g.
-	// `code with \ and ` backticks`.
-	text = replaceAllSubmatchFunc(specialInlineCodeRe, text, func(groups []string) string {
-		codeBlocks = append(codeBlocks, "`"+escapeCode(groups[1])+"`")
-		return codePlaceholder(len(codeBlocks) - 1)
-	})
-
-	text = replaceAllSubmatchFunc(inlineCodeRe, text, func(groups []string) string {
-		// Content cannot contain backticks, so only backslashes need care.
-		escaped := strings.ReplaceAll(groups[1], `\`, `\\`)
-		codeBlocks = append(codeBlocks, "`"+escaped+"`")
-		return codePlaceholder(len(codeBlocks) - 1)
-	})
-
-	text = isolateLinks(text, func(linkText, url string) string {
+	text = isolateInlineLinks(text, func(linkText, url string) string {
 		links = append(links, link{text: linkText, url: url})
 		return linkPlaceholder(len(links) - 1)
 	})
 
 	// --- Pass 2: rewrite markdown formatting to placeholders ---
-	// Longest delimiters first so ***/___/~~ are not split by the shorter
-	// passes. Telegram nests these freely, so a single conversion is always
-	// valid; the carriage-return disambiguation happens at restore time.
+	// Asterisk delimiter runs are resolved together by a stack pass, so
+	// flush-opening, flush-closing, and duplicate nested emphasis are handled
+	// symmetrically. The other delimiters retain the fixpoint passes used for
+	// same-character nesting. Telegram nests all of them freely; underscore
+	// disambiguation happens at restore time.
 	//
 	// Repeat the passes to a fixpoint. Same-character nesting — a *italic*
 	// span inside a **bold** span, or vice versa — can't resolve in one
@@ -467,16 +360,13 @@ func convert(text string, inline bool) string {
 	// span becomes a placeholder. Each conversion replaces delimiters with
 	// non-delimiter placeholder bytes, so the delimiter count strictly
 	// drops and this converges in a couple of iterations. The loop always
-	// exits early via `text == before`; maxEmphasisPasses is only a
-	// belt-and-braces guard against an unforeseen non-converging input,
-	// set well beyond any realistic nesting depth so it never truncates
-	// real formatting (and even if it did, the output stays valid MV2).
+	// exits early via `text == before`; maxEmphasisPasses is a
+	// belt-and-braces bound for adversarial input. Anything unresolved at
+	// that point remains literal or triggers the valid plain-text fallback.
 	const maxEmphasisPasses = 32
 	for range maxEmphasisPasses {
 		before := text
-		text = replaceDelimited(text, "***", func(c string) string {
-			return phBold + phItalic + c + phItalic + phBold
-		})
+		text = replaceAsteriskEmphasis(text)
 		text = replaceDelimited(text, "___", func(c string) string {
 			return phUnderline + phItalic + c + phItalic + phUnderline
 		})
@@ -495,12 +385,6 @@ func convert(text string, inline bool) string {
 		text = replaceDelimited(text, "||", func(c string) string {
 			return phSpoiler + c + phSpoiler
 		})
-		text = replaceDelimited(text, "**", func(c string) string {
-			return phBold + c + phBold
-		})
-		text = replaceDelimited(text, "*", func(c string) string {
-			return phItalic + c + phItalic
-		})
 		if text == before {
 			break
 		}
@@ -510,30 +394,30 @@ func convert(text string, inline bool) string {
 	}
 
 	// --- Pass 3: escape all remaining special characters ---
-	text = EscapeSpecialChars(text)
+	text = escapeSpecialChars(text)
 
 	// --- Pass 4: restore formatting placeholders ---
 	text = restorePlaceholders(text)
 
 	// --- Pass 5: restore links, then code blocks ---
-	// Links go first: their text may contain code placeholders.
-	for i := len(links) - 1; i >= 0; i-- {
+	// Links go first because their text and URLs may contain code placeholders.
+	// Each placeholder kind is expanded in one indexed pass; repeatedly calling
+	// strings.ReplaceAll here made span-heavy input quadratic.
+	renderedLinks := make([]string, len(links))
+	for i := range links {
 		url := links[i].url
 		// A code span isolated inside the URL would reinsert raw backticks
 		// and parens after escaping; expand it here so its bytes are
 		// escaped as part of the URL instead.
 		if strings.Contains(url, codeOpen) {
-			for k := len(codeBlocks) - 1; k >= 0; k-- {
-				url = strings.ReplaceAll(url, codePlaceholder(k), codeBlocks[k])
-			}
+			url = expandIndexedPlaceholders(url, codeOpen[0], codeClose[0], codeBlocks)
 		}
 		url = strings.ReplaceAll(url, `\`, `\\`)
 		url = strings.ReplaceAll(url, ")", `\)`)
-		text = strings.ReplaceAll(text, linkPlaceholder(i), "["+convert(links[i].text, true)+"]("+url+")")
+		renderedLinks[i] = "[" + convert(links[i].text, true) + "](" + url + ")"
 	}
-	for i := len(codeBlocks) - 1; i >= 0; i-- {
-		text = strings.ReplaceAll(text, codePlaceholder(i), codeBlocks[i])
-	}
+	text = expandIndexedPlaceholders(text, linkOpen[0], linkClose[0], renderedLinks)
+	text = expandIndexedPlaceholders(text, codeOpen[0], codeClose[0], codeBlocks)
 
 	return text
 }
