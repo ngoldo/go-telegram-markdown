@@ -339,7 +339,7 @@ func TestConvertNesting(t *testing.T) {
 	}{
 		// Adjacent underscore runs are separated by \r at every boundary,
 		// so nothing collapses into an ambiguous ___ that Telegram misreads.
-		{"italic wrapping triple underscore", "*___both___*", "_\r__\r_both_\r__\r_"},
+		{"italic wrapping triple underscore", "*___both___*", "_\r__both__\r_"},
 		{"bold wrapping triple underscore", "**bold ___both___ bold**", "*bold __\r_both_\r__ bold*"},
 		{"italic flush with underline", "*__x__*", "_\r__x__\r_"},
 		{"bold italic flush with underline", "***__x__***", "*_\r__x__\r_*"},
@@ -439,6 +439,7 @@ func TestConvertSafetyNet(t *testing.T) {
 	}{
 		{"crossing italic strike", "_~_~", `\_\~\_\~`},
 		{"crossing bold strike", "~**~**", `\~\*\*\~\*\*`},
+		{"crossing bold underline", "**a __b** c__", `\*\*a \_\_b\*\* c\_\_`},
 		{"crossing underline spoiler", "__||__||", `\_\_\|\|\_\_\|\|`},
 		// Emphasis opened in a blockquote and closed on an unquoted line is
 		// rejected at the blockquote-ending newline.
@@ -477,6 +478,57 @@ func TestValidMarkdownV2(t *testing.T) {
 		if validMarkdownV2(s) {
 			t.Errorf("validMarkdownV2(%q) = true, want false", s)
 		}
+	}
+}
+
+func TestConvertPreservesCodeAndNestedStyles(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"backslash inside linked code", "[run `a\\?b` and \\?](https://example.org)", "[run `a\\\\?b` and ?](https://example.org)"},
+		{"backslash inside unsupported image in a link", "[before ![a\\?b](asset) after](url)", "[before \\!\\[a\\\\?b\\]\\(asset\\) after](url)"},
+		{"duplicate underline", "__outer __inner__ tail__", "__outer inner tail__"},
+		{"duplicate strikethrough", "~outer ~~inner~~ tail~", "~outer inner tail~"},
+		{"duplicate spoiler", "||outer ||inner|| tail||", "||outer inner tail||"},
+		{"duplicate spoiler with italic", "||outer ||inner _text_|| tail||", "||outer inner _text_ tail||"},
+		{"duplicate spoiler in link label", "||outer [||inner||](url) tail||", "||outer [inner](url) tail||"},
+		{"duplicate bold in link label", "**outer [**inner**](url) tail**", "*outer [inner](url) tail*"},
+		{"spoiler containing bold nested spoiler", `||before **||"answer"||** after||`, `||before *"answer"* after||`},
+		{"spoiler containing bold nested spoiler after punctuation", `||before:**||"answer"||** after||`, `||before:*"answer"* after||`},
+		{"separate bold spans inside underscore italics", `_**"first"**—not bold—**"second"**_`, `_*"first"*—not bold—*"second"*_`},
+		{"spoiler includes parenthesised nested spoiler", `||Read **||one||** and (||"secret"||) privately||`, `||Read *one* and \("secret"\) privately||`},
+		{"literal asterisk within underline", `**See __file*__ below**`, `*See __file\*__ below*`},
+		{"nested bold meets underscore markers", `**Read (**_this_**) next**`, `*Read \(_this_\) next*`},
+		{"nested bold inside parentheses before a comma", `**Read (**_this_**, please) next**`, `*Read \(_this_, please\) next*`},
+		{"independent parenthesis cannot establish nested bold", `**Type (**_here_ (aside),**!next**`, `*Type \(*_here_ \(aside\),*\!next*`},
+		{"nested bold inside curly quotes", `**Read “**_this_**” next**`, `*Read “_this_” next*`},
+		{"nested bold inside straight quotes", `**Read "**_this_**" next**`, `*Read "_this_" next*`},
+		{"nested bold inside single quotes with a contraction", `**Read '**_don't_**' next**`, `*Read '_don't_' next*`},
+		{"nested bold inside curly single quotes with a contraction", `**Read ‘**_don’t_**’ next**`, `*Read ‘_don’t_’ next*`},
+		{"nested bold inside fullwidth brackets", `**Read （**_use (this)_**） next**`, `*Read （_use \(this\)_） next*`},
+		{"italic followed by bold", "_previous_**next**", "_previous_*next*"},
+		{"bold followed by italic", "**bold**_italic_", "*bold*_italic_"},
+		{"quoted bold followed by italic", `**"bold"**_italic_`, `*"bold"*_italic_`},
+		{"literal opening bracket ends independent spoiler", `||See (||. ||another||`, `||See \(||\. ||another||`},
+		{"opening bracket is not a spoiler closer", `||Type (||. (||"OK"||)`, `||Type \(||\. \(||"OK"||\)`},
+		{"spoiler can end with a literal opening bracket", `||Read (||"secret"||) and type (||.`, `||Read \("secret"\) and type \(||\.`},
+		{"intraword run cannot close outer spoiler", `||PIN (||) a||!b or c||d`, `||PIN \(||\) a\|\|\!b or c\|\|d`},
+		{"literal opening bracket ends bold before italics", `**See (**_another_`, `*See \(*_another_`},
+		{"later independent bold is not an outer closer", `**Type (**_here_ then (**"OK"**)`, `*Type \(*_here_ then \(*"OK"*\)`},
+		{"straight opening quote is not a bold closer", `**Type (**_here_ then "**!**"`, `*Type \(*_here_ then "*\!*"`},
+		{"curly opening quote is not a bold closer", `**Type (**_here_ then “**!**”`, `*Type \(*_here_ then “*\!*”`},
+		{"bold can end with a literal straight quote", `**Type "**_here_—**!**`, `*Type "*_here_—*\!*`},
+		{"independent spoilers", "||one|| and ||two||", "||one|| and ||two||"},
+		{"reserved closer byte is stripped", "a\x12\x05b", "ab"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := Convert(tt.in); got != tt.want {
+				t.Fatalf("Convert(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
 	}
 }
 

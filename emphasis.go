@@ -14,23 +14,16 @@ type asteriskReplacement struct {
 }
 
 type asteriskRun struct {
-	start     int
-	length    int
-	leftUsed  int
-	rightUsed int
-	canOpen   bool
-	canClose  bool
-	repls     []asteriskReplacement
-}
-
-type asteriskMatch struct {
-	openerIndex int
-	closerIndex int
-	openOffset  int
-	closeOffset int
-	width       int
-	marker      string
-	emit        bool
+	start      int
+	length     int
+	scope      int
+	next       int
+	leftUsed   int
+	rightUsed  int
+	canOpen    bool
+	canClose   bool
+	preferOpen bool
+	repls      []asteriskReplacement
 }
 
 func (r *asteriskRun) remaining() int {
@@ -46,13 +39,18 @@ func (r *asteriskRun) remaining() int {
 // delimiters embedded directly in a word stay literal. Whitespace flanking and
 // the CommonMark multiple-of-three rule prevent list markers and ambiguous
 // delimiter runs from becoming emphasis.
-func replaceAsteriskEmphasis(text string) string {
+func replaceAsteriskEmphasis(text string, respectScope bool) string {
 	if !strings.Contains(text, "*") {
 		return text
 	}
 
 	var runs []asteriskRun
+	var scope emphasisScope
 	for i := 0; i < len(text); {
+		if width := scope.consume(text[i], i); width != 0 {
+			i += width
+			continue
+		}
 		if text[i] != '*' {
 			i++
 			continue
@@ -91,25 +89,46 @@ func replaceAsteriskEmphasis(text string) string {
 			after, _ = utf8.DecodeRuneInString(text[end:])
 		}
 
+		// A run directly after an opening bracket and before an
+		// underscore span can introduce that span, not end a previous one.
+		beforeUnderscoreOpen := haveAfter && isUnderscoreMarker(text[end])
 		canOpen := haveAfter && !unicode.IsSpace(after) &&
 			(!haveBefore || !isWordBefore(text, start))
 		canClose := haveBefore && !unicode.IsSpace(before) &&
 			(!haveAfter || !isWordRune(after))
 
+		enclosing := 0
+		if respectScope {
+			enclosing = scope.current()
+		}
 		runs = append(runs, asteriskRun{
-			start:    start,
-			length:   end - start,
-			canOpen:  canOpen,
-			canClose: canClose,
+			start:      start,
+			length:     end - start,
+			scope:      enclosing,
+			next:       -1,
+			canOpen:    canOpen,
+			canClose:   canClose,
+			preferOpen: respectScope && beforeUnderscoreOpen && afterOpeningPunctuation(text, start),
 		})
 	}
 
+	if respectScope {
+		nextByScope := make(map[int]int)
+		for i := len(runs) - 1; i >= 0; i-- {
+			run := &runs[i]
+			if next, ok := nextByScope[run.scope]; ok {
+				run.next = next
+			}
+			nextByScope[run.scope] = i
+		}
+	}
+
 	matched := false
-	var matches []asteriskMatch
-	var openers [6][]int
+	byScope := make(map[int]*[6][]int)
 	for closerIndex := range runs {
 		closer := &runs[closerIndex]
-		if closer.canClose {
+		openers := byScope[closer.scope]
+		if closer.canClose && openers != nil && !preferNestedAsteriskOpener(text, runs, closer) {
 			for closer.remaining() > 0 {
 				openerIndex := -1
 				openerGroup := -1
@@ -154,14 +173,15 @@ func replaceAsteriskEmphasis(text string) string {
 
 				closeOffset := closer.leftUsed
 				closer.leftUsed += width
-				matches = append(matches, asteriskMatch{
-					openerIndex: openerIndex,
-					closerIndex: closerIndex,
-					openOffset:  openOffset,
-					closeOffset: closeOffset,
-					width:       width,
-					marker:      marker,
-					emit:        true,
+				opener.repls = append(opener.repls, asteriskReplacement{
+					offset: openOffset,
+					width:  width,
+					marker: marker,
+				})
+				closer.repls = append(closer.repls, asteriskReplacement{
+					offset: closeOffset,
+					width:  width,
+					marker: phClose + marker,
 				})
 				matched = true
 
@@ -173,6 +193,10 @@ func replaceAsteriskEmphasis(text string) string {
 		}
 
 		if closer.canOpen && closer.remaining() > 0 {
+			if openers == nil {
+				openers = new([6][]int)
+				byScope[closer.scope] = openers
+			}
 			group := closer.length % 3 * 2
 			if closer.canClose {
 				group++
@@ -183,31 +207,6 @@ func replaceAsteriskEmphasis(text string) string {
 
 	if !matched {
 		return text
-	}
-
-	// Telegram cannot represent an entity nested inside another entity of the
-	// same type. Such nesting is idempotent, so flatten it to the outer span
-	// whilst still consuming every source delimiter. Without this step,
-	// ****text**** would become **text**, which TDLib interprets as empty bold
-	// entities rather than bold text.
-	suppressNestedAsteriskMatches(matches, runs)
-	for _, match := range matches {
-		marker := ""
-		if match.emit {
-			marker = match.marker
-		}
-		opener := &runs[match.openerIndex]
-		opener.repls = append(opener.repls, asteriskReplacement{
-			offset: match.openOffset,
-			width:  match.width,
-			marker: marker,
-		})
-		closer := &runs[match.closerIndex]
-		closer.repls = append(closer.repls, asteriskReplacement{
-			offset: match.closeOffset,
-			width:  match.width,
-			marker: marker,
-		})
 	}
 
 	var b strings.Builder
@@ -240,6 +239,96 @@ func replaceAsteriskEmphasis(text string) string {
 	return b.String()
 }
 
+// Defer a valid closer only if the next runs can close the proposed inner
+// span and still leave a closer for its parent. An independent opener
+// following opening punctuation cannot supply either closing delimiter.
+func preferNestedAsteriskOpener(text string, runs []asteriskRun, run *asteriskRun) bool {
+	if !run.preferOpen || !run.canOpen || run.next < 0 {
+		return false
+	}
+	innerClose := &runs[run.next]
+	if innerClose.length < run.length || !canEndAsteriskSpan(text, innerClose) ||
+		violatesAsteriskRuleOfThree(run, innerClose) {
+		return false
+	}
+	// A wrapping bracket or quote must end between the inner and outer
+	// closers. Another emphasis pair alone does not establish nesting.
+	start := innerClose.start + innerClose.length
+	end := len(text)
+	if innerClose.next >= 0 {
+		outerClose := &runs[innerClose.next]
+		end = outerClose.start
+		if innerClose.length-run.length < run.length && !canEndAsteriskSpan(text, outerClose) {
+			return false
+		}
+	} else if innerClose.length-run.length < run.length {
+		return false
+	}
+	opening, _ := utf8.DecodeLastRuneInString(text[:run.start])
+	return punctuationWrapsSpan(text[run.start:end], opening, start-run.start)
+}
+
+func punctuationWrapsSpan(text string, opening rune, spanEnd int) bool {
+	closing := closingPunctuation(opening)
+	if closing == 0 {
+		return false
+	}
+
+	depth := 1
+	for offset, r := range text {
+		if r == closing {
+			if (r == '\'' || r == '’') && isWordBefore(text, offset) {
+				next, _ := utf8.DecodeRuneInString(text[offset+utf8.RuneLen(r):])
+				if isWordRune(next) {
+					continue // an apostrophe inside a word
+				}
+			}
+			depth--
+			if depth == 0 {
+				return offset >= spanEnd
+			}
+		} else if r == opening {
+			depth++
+		}
+	}
+	return false
+}
+
+func closingPunctuation(opening rune) rune {
+	switch opening {
+	case '"', '\'':
+		return opening
+	case '“':
+		return '”'
+	case '‘':
+		return '’'
+	case '«':
+		return '»'
+	case '‹':
+		return '›'
+	case '[', '{', '［', '｛':
+		return opening + 2
+	case '⦍':
+		return '⦐'
+	case '⦏':
+		return '⦎'
+	}
+	// The remaining Unicode paired brackets are consecutive code points.
+	// https://www.unicode.org/Public/17.0.0/ucd/BidiBrackets.txt
+	if unicode.Is(unicode.Ps, opening) && unicode.Is(unicode.Pe, opening+1) {
+		return opening + 1
+	}
+	return 0
+}
+
+func canEndAsteriskSpan(text string, run *asteriskRun) bool {
+	return run.canClose && (!run.canOpen || !afterOpeningPunctuation(text, run.start))
+}
+
+func isUnderscoreMarker(marker byte) bool {
+	return marker == phItalic[0] || marker == phUnderline[0]
+}
+
 func asteriskStartsKeycap(text string, pos int) bool {
 	if pos < 0 || pos >= len(text) || text[pos] != '*' {
 		return false
@@ -257,41 +346,6 @@ func asteriskStartsKeycap(text string, pos int) bool {
 		r, _ = utf8.DecodeRuneInString(text[pos:])
 	}
 	return r == '\u20E3'
-}
-
-func suppressNestedAsteriskMatches(matches []asteriskMatch, runs []asteriskRun) {
-	for _, marker := range []string{phBold, phItalic} {
-		var ordered []int
-		for i := range matches {
-			if matches[i].marker == marker {
-				ordered = append(ordered, i)
-			}
-		}
-		sort.Slice(ordered, func(i, j int) bool {
-			left := matches[ordered[i]]
-			right := matches[ordered[j]]
-			leftStart := runs[left.openerIndex].start + left.openOffset + left.width
-			rightStart := runs[right.openerIndex].start + right.openOffset + right.width
-			if leftStart != rightStart {
-				return leftStart < rightStart
-			}
-			leftEnd := runs[left.closerIndex].start + left.closeOffset
-			rightEnd := runs[right.closerIndex].start + right.closeOffset
-			return leftEnd > rightEnd
-		})
-
-		outerEnd := -1
-		for _, matchIndex := range ordered {
-			match := &matches[matchIndex]
-			start := runs[match.openerIndex].start + match.openOffset + match.width
-			end := runs[match.closerIndex].start + match.closeOffset
-			if start < outerEnd && end <= outerEnd {
-				match.emit = false
-				continue
-			}
-			outerEnd = end
-		}
-	}
 }
 
 func violatesAsteriskRuleOfThree(opener, closer *asteriskRun) bool {

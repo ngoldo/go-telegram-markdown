@@ -27,6 +27,7 @@ const (
 	phStrike    = "\x04"
 	phSpoiler   = "\x05"
 	phQuote     = "\x06"
+	phClose     = "\x12" // followed by the emphasis marker being closed
 )
 
 // Delimiters for code-block and link placeholders, likewise stripped from
@@ -40,7 +41,7 @@ const (
 )
 
 // strippedControl lists every byte Convert reserves for internal use.
-const strippedControl = "\x01\x02\x03\x04\x05\x06\x07\x08\x0E\x0F\x10\x11"
+const strippedControl = "\x01\x02\x03\x04\x05\x06\x07\x08\x0E\x0F\x10\x11\x12"
 
 var (
 	// RE2's \s is ASCII-only; the class below also covers Unicode
@@ -105,7 +106,7 @@ func sanitizeControl(text string) string {
 	b.Grow(len(text))
 	for i := 0; i < len(text); i++ {
 		c := text[i]
-		if c >= 0x01 && c <= 0x08 || c >= 0x0E && c <= 0x11 {
+		if c < ' ' && strings.IndexByte(strippedControl, c) >= 0 {
 			continue
 		}
 		b.WriteByte(c)
@@ -192,86 +193,60 @@ func escapeSpecialChars(text string) string {
 //     (e.g. the stray tildes in "a~~b~~c" or the pipes in "a|||b|||c") and does
 //     not match, so half of a run never opens a lone span.
 //
-// Escaped delimiter bytes and shorter runs may remain literal content, so the
-// closer search advances past them to the next complete unescaped candidate.
-// Failed opener candidates advance by one position, like a regex engine's
-// scan.
+// Escaped delimiters and delimiters inside a different already-matched
+// emphasis span cannot close an opener. Index the unescaped positions within
+// each enclosing span so that looking for a closer does not rescan the text.
 func replaceDelimited(text, delim string, repl func(content string) string) string {
 	d := delim[0]
-	if !strings.Contains(text, delim) {
+	firstDelimiter := strings.IndexByte(text, d)
+	if firstDelimiter < 0 || !strings.Contains(text[firstDelimiter:], delim) {
 		return text
 	}
+	width := len(delim)
+	runs := indexDelimiterRuns(text, delim)
 	var b strings.Builder
-	last, i := 0, 0
-	for i < len(text) {
-		if !strings.HasPrefix(text[i:], delim) {
-			i++
+	last := 0
+	for pos, opener := range runs {
+		i := opener.start
+		if i < last || i != opener.closer || opener.length >= 2*width {
 			continue
 		}
-		if i > 0 {
-			r, _ := utf8.DecodeLastRuneInString(text[:i])
-			if r == rune(d) || isWordBefore(text, i) || oddBackslashesBefore(text, i) {
-				i++
-				continue
-			}
-		}
-		search := i + len(delim)
-		j := -1
-		for search < len(text) {
-			rel := strings.IndexByte(text[search:], d)
-			if rel < 0 {
-				break
-			}
-			candidate := search + rel
-			if strings.HasPrefix(text[candidate:], delim) &&
-				!oddBackslashesBefore(text, candidate) {
-				j = candidate
-				break
-			}
-			// An escaped delimiter is literal content, not proof that the
-			// opener has no later closer: *foo \* bar* must keep looking.
-			search = candidate + 1
-		}
-		if j < 0 {
-			break // no delimiter char remains anywhere
-		}
-		content := text[i+len(delim) : j]
-		if content == "" {
-			i++
+		if isWordBefore(text, i) {
 			continue
 		}
-		if after := j + len(delim); after < len(text) {
-			r, _ := utf8.DecodeRuneInString(text[after:])
-			switch {
-			case isWordRune(r):
-				// Flanking: a closer flush against a word character does not
-				// close, so "file~1" and "a**b**c" stay literal.
-				i++
-				continue
-			case r == rune(d) && strings.IndexByte(text[:i], d) < 0:
-				// The closer is followed by a run of its own delimiter char and
-				// no same-delimiter opener precedes this span: the closer is part
-				// of a longer run ("a~~b~~c"), not a nested closer, so it cannot
-				// match. When a same-delimiter opener *does* precede, the trailing
-				// run is an enclosing span's flush closer — "**a *b***" is
-				// bold(a, italic(b)), whose inner *b* closes flush against the
-				// outer ** — so allow the match and let the fixpoint resolve the
-				// outer span. A wrong guess still fails validMarkdownV2 and falls
-				// back to escaped plain text.
-				i++
+		closer := opener.next
+		if closer < 0 {
+			// Retain a crossing candidate for the renderer to reject
+			// rather than silently formatting only one of the spans.
+			closer = pos + 1
+			if closer == len(runs) {
 				continue
 			}
 		}
+		j := runs[closer].closer
+		content := text[i+width : j]
 		first, _ := utf8.DecodeRuneInString(content)
-		lastRune, _ := utf8.DecodeLastRuneInString(content)
-		if unicode.IsSpace(first) || unicode.IsSpace(lastRune) {
-			i++
+		previous, _ := utf8.DecodeLastRuneInString(content)
+		if unicode.IsSpace(first) || unicode.IsSpace(previous) {
 			continue
+		}
+		after := j + width
+		if after < len(text) {
+			next, _ := utf8.DecodeRuneInString(text[after:])
+			if isWordRune(next) || next == rune(d) && i == firstDelimiter {
+				continue
+			}
+			// An opening bracket or quote directly before a run favours
+			// a nested opener if it has content on the right and another
+			// delimiter follows. Match that inner pair on this pass.
+			if afterOpeningPunctuation(text, j) && !unicode.IsSpace(next) &&
+				canOpenNestedSpan(text, runs, closer, width) {
+				continue
+			}
 		}
 		b.WriteString(text[last:i])
 		b.WriteString(repl(content))
-		i = j + len(delim)
-		last = i
+		last = after
 	}
 	if last == 0 {
 		return text
@@ -280,22 +255,142 @@ func replaceDelimited(text, delim string, repl func(content string) string) stri
 	return b.String()
 }
 
-// restorePlaceholders turns the formatting-marker bytes back into MarkdownV2
-// syntax. Italic (_) and underline (__) share the underscore character and
-// Telegram groups __ greedily left to right, so whenever two underscore
-// delimiters would end up adjacent (at a nesting boundary such as ___x___) a
-// carriage return is inserted between them — the spec's disambiguator — which
-// keeps every underscore run unambiguous and every entity balanced.
-func restorePlaceholders(text string) string {
-	if !strings.ContainsAny(text, phBold+phItalic+phUnderline+phStrike+phSpoiler+phQuote) {
-		return text
+func canOpenNestedSpan(text string, runs []delimiterRun, opener, width int) bool {
+	run := runs[opener]
+	if run.start != run.closer || run.length >= 2*width || run.next < 0 {
+		return false
+	}
+	closer := runs[run.next]
+	if closer.next < 0 {
+		return false // the enclosing span needs a closer of its own
+	}
+	return canCloseNestedDelimiter(text, runs, run.next, width) &&
+		canCloseNestedDelimiter(text, runs, closer.next, width)
+}
+
+func canCloseNestedDelimiter(text string, runs []delimiterRun, index, width int) bool {
+	run := runs[index]
+	if !hasClosingBoundary(text, run.closer, width) {
+		return false
+	}
+	if run.next < 0 || run.start != run.closer || run.length >= 2*width {
+		return true
+	}
+	next, _ := utf8.DecodeRuneInString(text[run.closer+width:])
+	return unicode.IsSpace(next) || !afterOpeningPunctuation(text, run.closer) ||
+		!hasClosingBoundary(text, runs[run.next].closer, width)
+}
+
+func hasClosingBoundary(text string, start, width int) bool {
+	last, _ := utf8.DecodeLastRuneInString(text[:start])
+	next, _ := utf8.DecodeRuneInString(text[start+width:])
+	return !unicode.IsSpace(last) && !isWordRune(next)
+}
+
+func afterOpeningPunctuation(text string, offset int) bool {
+	r, size := utf8.DecodeLastRuneInString(text[:offset])
+	if r == '"' || r == '\'' {
+		// Straight quotes use the same rune at both ends. A quote after
+		// whitespace or an opening bracket belongs to the following text.
+		before, _ := utf8.DecodeLastRuneInString(text[:offset-size])
+		return offset == size || unicode.IsSpace(before) ||
+			unicode.Is(unicode.Ps, before) || unicode.Is(unicode.Pi, before)
+	}
+	return unicode.Is(unicode.Ps, r) || unicode.Is(unicode.Pi, r)
+}
+
+type delimiterRun struct {
+	start  int
+	length int
+	closer int
+	next   int
+}
+
+// Index each unescaped run once, with a separate chain for every enclosing
+// span. A run can close at its second byte if only its first byte is escaped.
+func indexDelimiterRuns(text, delim string) []delimiterRun {
+	var runs []delimiterRun
+	var scope emphasisScope
+	previous := make(map[int]int)
+	for i := 0; i < len(text); {
+		if width := scope.consume(text[i], i); width != 0 {
+			i += width
+			continue
+		}
+		if text[i] != delim[0] {
+			i++
+			continue
+		}
+		start := i
+		for i < len(text) && text[i] == delim[0] {
+			i++
+		}
+		closer := start
+		if oddBackslashesBefore(text, start) {
+			closer++
+		}
+		if i-closer < len(delim) {
+			continue
+		}
+		enclosing := scope.current()
+		if prior, ok := previous[enclosing]; ok {
+			runs[prior].next = len(runs)
+		}
+		previous[enclosing] = len(runs)
+		runs = append(runs, delimiterRun{start: start, length: i - start, closer: closer, next: -1})
+	}
+	return runs
+}
+
+// An opening marker's offset identifies its scope, including when several
+// distinct spans use the same style. The outermost text has scope zero.
+type emphasisScope []int
+
+func (s *emphasisScope) consume(marker byte, offset int) int {
+	switch marker {
+	case phBold[0], phItalic[0], phUnderline[0], phStrike[0], phSpoiler[0]:
+		*s = append(*s, offset+1)
+		return 1
+	case phClose[0]:
+		if len(*s) > 0 {
+			*s = (*s)[:len(*s)-1]
+		}
+		return 2 // the following byte names the closing style
+	default:
+		return 0
+	}
+}
+
+func (s emphasisScope) current() int {
+	if len(s) == 0 {
+		return 0
+	}
+	return s[len(s)-1]
+}
+
+// restorePlaceholders renders balanced emphasis after the link labels have
+// been expanded. A nested span of the same style needs no extra delimiters:
+// Telegram would interpret them as closing and reopening the outer span.
+func restorePlaceholders(text string) (string, bool) {
+	if !strings.ContainsAny(text, phBold+phItalic+phUnderline+phStrike+phSpoiler+phQuote+phClose) {
+		return text, true
 	}
 	var b strings.Builder
 	b.Grow(len(text) + 8)
+	var stack []byte
+	var depth [6]int // emphasis markers occupy bytes 1 through 5
 	var lastByte byte
 	for i := 0; i < len(text); i++ {
+		closing := text[i] == phClose[0]
+		if closing {
+			i++
+			if i == len(text) {
+				return "", false
+			}
+		}
+		marker := text[i]
 		var out string
-		switch text[i] {
+		switch marker {
 		case phBold[0]:
 			out = "*"
 		case phItalic[0]:
@@ -307,19 +402,48 @@ func restorePlaceholders(text string) string {
 		case phSpoiler[0]:
 			out = "||"
 		case phQuote[0]:
+			if closing {
+				return "", false
+			}
 			out = ">"
 		default:
-			b.WriteByte(text[i])
-			lastByte = text[i]
+			if closing {
+				return "", false
+			}
+			b.WriteByte(marker)
+			lastByte = marker
 			continue
 		}
+
+		if closing {
+			if len(stack) == 0 || stack[len(stack)-1] != marker {
+				return "", false
+			}
+			stack = stack[:len(stack)-1]
+			depth[marker]--
+			if depth[marker] > 0 {
+				continue
+			}
+		} else if marker != phQuote[0] {
+			stack = append(stack, marker)
+			depth[marker]++
+			if depth[marker] > 1 {
+				continue
+			}
+		}
+
+		// Telegram groups __ greedily. Separate adjacent underscore markers
+		// with the MarkdownV2 carriage-return disambiguator.
 		if out[0] == '_' && lastByte == '_' {
 			b.WriteByte('\r')
 		}
 		b.WriteString(out)
 		lastByte = out[len(out)-1]
 	}
-	return b.String()
+	if len(stack) != 0 {
+		return "", false
+	}
+	return b.String(), true
 }
 
 // Convert converts a Markdown string to a Telegram-safe MarkdownV2 string.
@@ -334,10 +458,11 @@ func restorePlaceholders(text string) string {
 //     needs word boundaries and non-whitespace flanking, so list markers
 //     ("* item") and spaced operators ("5 * 3") stay literal text.
 //  3. All remaining special characters are escaped.
-//  4. Formatting placeholders are restored as MarkdownV2 syntax, inserting the
-//     spec's carriage-return disambiguator between adjacent underscore runs.
-//  5. Links and code blocks are restored; link text is converted recursively,
+//  4. Links and code blocks are restored; link text is converted recursively,
 //     and ')' and '\' inside URLs are escaped as the spec requires.
+//  5. Balanced formatting placeholders are rendered as MarkdownV2 syntax.
+//     Duplicate nested styles are flattened and adjacent underscore markers
+//     are separated by the MarkdownV2 carriage-return disambiguator.
 //
 // Well-formed Markdown always converts to valid MarkdownV2. Deeply malformed
 // input (for example crossing emphasis like "_~_~") can defeat the multi-pass
@@ -347,15 +472,15 @@ func Convert(text string) string {
 	text = strings.ToValidUTF8(text, "\uFFFD")
 	text = normaliseLineEndings(text)
 	text = sanitizeControl(text)
-	if out := convert(text, false); validMarkdownV2(out) {
+	if out, balanced := restorePlaceholders(convert(text, false)); balanced && validMarkdownV2(out) {
 		return out
 	}
 	return escapeSpecialChars(text)
 }
 
-// convert runs the five passes. When inline is true (converting link text)
-// blockquotes are not recognised — a link's text is an inline context, and a
-// '>' there is a reserved character that must stay escaped, not a quote.
+// convert leaves the formatting markers in place so that the caller can
+// render emphasis spanning both the surrounding text and link labels.
+// Only the outer conversion recognises blockquotes.
 func convert(text string, inline bool) string {
 	if text == "" {
 		return text
@@ -387,48 +512,49 @@ func convert(text string, inline bool) string {
 		return codePlaceholder(len(codeBlocks) - 1)
 	})
 
-	// --- Pass 2: rewrite markdown formatting to placeholders ---
-	// Asterisk delimiter runs are resolved together by a stack pass, so
-	// flush-opening, flush-closing, and duplicate nested emphasis are handled
-	// symmetrically. The other delimiters retain the fixpoint passes used for
-	// same-character nesting. Telegram nests all of them freely; underscore
-	// disambiguation happens at restore time.
-	//
-	// Repeat the passes to a fixpoint. Same-character nesting — a *italic*
-	// span inside a **bold** span, or vice versa — can't resolve in one
-	// sweep: replaceDelimited abandons a span whose content still holds its
-	// own delimiter char, so the outer span only matches after its inner
-	// span becomes a placeholder. Each conversion replaces delimiters with
-	// non-delimiter placeholder bytes, so the delimiter count strictly
-	// drops and this converges in a couple of iterations. The loop always
-	// exits early via `text == before`; maxEmphasisPasses is a
-	// belt-and-braces bound for adversarial input. Anything unresolved at
-	// that point remains literal or triggers the valid plain-text fallback.
+	if inline {
+		// Only ordinary label text interprets Markdown backslash escapes.
+		// Code and unsupported images are opaque by this point.
+		text = normaliseCommonMarkLinkTextEscapes(text)
+	}
+
+	// --- Pass 2: rewrite Markdown formatting to placeholders ---
+	// Match the non-asterisk styles again after inner spans become opaque.
+	// Each successful match removes source delimiters. Bound the number of
+	// passes so deeply nested input cannot cause unbounded rescanning.
 	const maxEmphasisPasses = 32
 	for range maxEmphasisPasses {
 		before := text
-		text = replaceAsteriskEmphasis(text)
 		text = replaceDelimited(text, "___", func(c string) string {
-			return phUnderline + phItalic + c + phItalic + phUnderline
+			return phUnderline + phItalic + c + phClose + phItalic + phClose + phUnderline
 		})
 		text = replaceDelimited(text, "__", func(c string) string {
-			return phUnderline + c + phUnderline
+			return phUnderline + c + phClose + phUnderline
 		})
 		text = replaceDelimited(text, "_", func(c string) string {
-			return phItalic + c + phItalic
+			return phItalic + c + phClose + phItalic
 		})
+		// Resolve enclosing underscores before the asterisk pass tests word
+		// boundaries. Raw underscores would hide valid asterisk runs.
+		text = replaceAsteriskEmphasis(text, true)
 		text = replaceDelimited(text, "~~", func(c string) string {
-			return phStrike + c + phStrike
+			return phStrike + c + phClose + phStrike
 		})
 		text = replaceDelimited(text, "~", func(c string) string {
-			return phStrike + c + phStrike
+			return phStrike + c + phClose + phStrike
 		})
 		text = replaceDelimited(text, "||", func(c string) string {
-			return phSpoiler + c + phSpoiler
+			return phSpoiler + c + phClose + phSpoiler
 		})
 		if text == before {
 			break
 		}
+	}
+	// Once every within-scope asterisk pair is resolved, try the remaining
+	// pairs across scope boundaries. The renderer rejects crossing spans
+	// so malformed input keeps the documented plain-text fallback.
+	if strings.Contains(text, phClose) {
+		text = replaceAsteriskEmphasis(text, false)
 	}
 	if !inline {
 		text = blockquoteRe.ReplaceAllString(text, phQuote+"${1}")
@@ -437,10 +563,7 @@ func convert(text string, inline bool) string {
 	// --- Pass 3: escape all remaining special characters ---
 	text = escapeSpecialChars(text)
 
-	// --- Pass 4: restore formatting placeholders ---
-	text = restorePlaceholders(text)
-
-	// --- Pass 5: restore links, then code blocks ---
+	// --- Pass 4: restore links, then code blocks ---
 	// Each placeholder kind is expanded in one indexed pass; repeatedly calling
 	// strings.ReplaceAll here made span-heavy input quadratic.
 	renderedLinks := make([]string, len(links))
