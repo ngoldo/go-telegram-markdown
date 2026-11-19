@@ -1,6 +1,7 @@
 package tgmarkdown
 
 import (
+	"slices"
 	"strconv"
 	"strings"
 )
@@ -239,11 +240,10 @@ func renderFencedCode(info, content string) string {
 // single language token. Emitting trailing attributes after the token would
 // make TDLib treat them as the first bytes of the code content.
 func fencedCodeLanguage(info string) string {
-	fields := strings.Fields(info)
-	if len(fields) == 0 {
-		return ""
+	for language := range strings.FieldsSeq(info) {
+		return decodeCommonMarkEscapes(language)
 	}
-	return decodeCommonMarkEscapes(fields[0])
+	return ""
 }
 
 // sourceLineBounds returns the content end and the byte immediately after the
@@ -396,8 +396,8 @@ func isolateInlineCode(text string, store func(source, rendered string) string) 
 	// rescanning the remainder of the input for every candidate opener.
 	nextSameLength := make([]int, len(runs))
 	nextByLength := make(map[int]int)
-	for i := len(runs) - 1; i >= 0; i-- {
-		openerLength := runs[i].end - runs[i].openerStart
+	for i, run := range slices.Backward(runs) {
+		openerLength := run.end - run.openerStart
 		next := -1
 		if openerLength > 0 {
 			if candidate, ok := nextByLength[openerLength]; ok {
@@ -405,7 +405,7 @@ func isolateInlineCode(text string, store func(source, rendered string) string) 
 			}
 		}
 		nextSameLength[i] = next
-		physicalLength := runs[i].end - runs[i].start
+		physicalLength := run.end - run.start
 		nextByLength[physicalLength] = i
 	}
 

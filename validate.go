@@ -252,7 +252,7 @@ func validMarkdownV2(s string) bool {
 
 func validTelegramCustomEntityURL(rawURL string) bool {
 	if query, ok := telegramEntityQuery(rawURL, "emoji"); ok {
-		for _, parameter := range strings.Split(query, "&") {
+		for parameter := range strings.SplitSeq(query, "&") {
 			key, value, _ := strings.Cut(parameter, "=")
 			if key == "id" {
 				id, ok := parseTDLibInteger(value, 64)
@@ -269,7 +269,7 @@ func validTelegramCustomEntityURL(rawURL string) bool {
 
 	var unixTime int64
 	format := ""
-	for _, parameter := range strings.Split(query, "&") {
+	for parameter := range strings.SplitSeq(query, "&") {
 		key, value, _ := strings.Cut(parameter, "=")
 		switch key {
 		case "unix":
@@ -289,27 +289,15 @@ func telegramEntityQuery(rawURL, host string) (string, bool) {
 	if len(rawURL) < len("tg:") || !strings.EqualFold(rawURL[:len("tg:")], "tg:") {
 		return "", false
 	}
-	rest := rawURL[len("tg:"):]
-	if strings.HasPrefix(rest, "//") {
-		rest = rest[2:]
-	}
+	rest := strings.TrimPrefix(rawURL[len("tg:"):], "//")
 	if len(rest) < len(host) || !strings.EqualFold(rest[:len(host)], host) {
 		return "", false
 	}
-	rest = rest[len(host):]
-	if len(rest) > 0 && !strings.ContainsRune("/?#", rune(rest[0])) {
+	query, ok := strings.CutPrefix(strings.TrimPrefix(rest[len(host):], "/"), "?")
+	if !ok {
 		return "", false
 	}
-	if strings.HasPrefix(rest, "/") {
-		rest = rest[1:]
-	}
-	if !strings.HasPrefix(rest, "?") {
-		return "", false
-	}
-	query := rest[1:]
-	if fragment := strings.IndexByte(query, '#'); fragment >= 0 {
-		query = query[:fragment]
-	}
+	query, _, _ = strings.Cut(query, "#")
 	return query, true
 }
 
