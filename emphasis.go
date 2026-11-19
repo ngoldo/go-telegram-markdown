@@ -269,43 +269,56 @@ func preferNestedAsteriskOpener(text string, runs []asteriskRun, run *asteriskRu
 }
 
 func punctuationWrapsSpan(text string, opening rune, spanEnd int) bool {
-	var closing rune
-	switch opening {
-	case '(':
-		closing = ')'
-	case '[':
-		closing = ']'
-	case '{':
-		closing = '}'
-	case '"', '\'':
-		closing = opening
-	case '“':
-		closing = '”'
-	case '‘':
-		closing = '’'
-	case '«':
-		closing = '»'
-	case '‹':
-		closing = '›'
-	}
-	closingClass := unicode.Pe
-	if unicode.Is(unicode.Pi, opening) {
-		closingClass = unicode.Pf
+	closing := closingPunctuation(opening)
+	if closing == 0 {
+		return false
 	}
 
 	depth := 1
 	for offset, r := range text {
-		switch {
-		case r == closing && closing != 0, closing == 0 && unicode.Is(closingClass, r):
+		if r == closing {
+			if (r == '\'' || r == '’') && isWordBefore(text, offset) {
+				next, _ := utf8.DecodeRuneInString(text[offset+utf8.RuneLen(r):])
+				if isWordRune(next) {
+					continue // an apostrophe inside a word
+				}
+			}
 			depth--
 			if depth == 0 {
 				return offset >= spanEnd
 			}
-		case r == opening:
+		} else if r == opening {
 			depth++
 		}
 	}
 	return false
+}
+
+func closingPunctuation(opening rune) rune {
+	switch opening {
+	case '"', '\'':
+		return opening
+	case '“':
+		return '”'
+	case '‘':
+		return '’'
+	case '«':
+		return '»'
+	case '‹':
+		return '›'
+	case '[', '{', '［', '｛':
+		return opening + 2
+	case '⦍':
+		return '⦐'
+	case '⦏':
+		return '⦎'
+	}
+	// The remaining Unicode paired brackets are consecutive code points.
+	// https://www.unicode.org/Public/17.0.0/ucd/BidiBrackets.txt
+	if unicode.Is(unicode.Ps, opening) && unicode.Is(unicode.Pe, opening+1) {
+		return opening + 1
+	}
+	return 0
 }
 
 func canEndAsteriskSpan(text string, run *asteriskRun) bool {
