@@ -1,7 +1,7 @@
 # go-telegram-markdown
 
 A zero-dependency Go library for converting a focused Markdown dialect to
-Telegram's MarkdownV2 format. It requires Go 1.24 or later.
+Telegram's MarkdownV2 format. It requires Go 1.27 or later.
 
 ## Features
 

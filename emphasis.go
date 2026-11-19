@@ -1,7 +1,8 @@
 package tgmarkdown
 
 import (
-	"sort"
+	"cmp"
+	"slices"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -114,7 +115,7 @@ func replaceAsteriskEmphasis(text string, respectScope bool) string {
 
 	if respectScope {
 		nextByScope := make(map[int]int)
-		for i := len(runs) - 1; i >= 0; i-- {
+		for i := range slices.Backward(runs) {
 			run := &runs[i]
 			if next, ok := nextByScope[run.scope]; ok {
 				run.next = next
@@ -218,8 +219,8 @@ func replaceAsteriskEmphasis(text string, respectScope bool) string {
 			continue
 		}
 		b.WriteString(text[last:run.start])
-		sort.Slice(run.repls, func(i, j int) bool {
-			return run.repls[i].offset < run.repls[j].offset
+		slices.SortFunc(run.repls, func(left, right asteriskReplacement) int {
+			return cmp.Compare(left.offset, right.offset)
 		})
 
 		runPos := 0
