@@ -264,15 +264,27 @@ func canOpenNestedSpan(text string, runs []delimiterRun, opener, width int) bool
 	if closer.next < 0 {
 		return false // the enclosing span needs a closer of its own
 	}
-	return hasClosingBoundary(text, closer.closer, width) &&
-		hasClosingBoundary(text, runs[closer.next].closer, width)
+	return canCloseNestedDelimiter(text, runs, run.next, width) &&
+		canCloseNestedDelimiter(text, runs, closer.next, width)
+}
+
+func canCloseNestedDelimiter(text string, runs []delimiterRun, index, width int) bool {
+	run := runs[index]
+	if !hasClosingBoundary(text, run.closer, width) {
+		return false
+	}
+	if run.next < 0 || run.start != run.closer || run.length >= 2*width {
+		return true
+	}
+	next, _ := utf8.DecodeRuneInString(text[run.closer+width:])
+	return unicode.IsSpace(next) || !afterOpeningPunctuation(text, run.closer) ||
+		!hasClosingBoundary(text, runs[run.next].closer, width)
 }
 
 func hasClosingBoundary(text string, start, width int) bool {
 	last, _ := utf8.DecodeLastRuneInString(text[:start])
 	next, _ := utf8.DecodeRuneInString(text[start+width:])
-	return !unicode.IsSpace(last) && !isWordRune(next) &&
-		(start+width == len(text) || unicode.IsSpace(next) || !afterOpeningPunctuation(text, start))
+	return !unicode.IsSpace(last) && !isWordRune(next)
 }
 
 func afterOpeningPunctuation(text string, offset int) bool {

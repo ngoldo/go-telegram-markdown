@@ -108,7 +108,7 @@ func replaceAsteriskEmphasis(text string, respectScope bool) string {
 			next:       -1,
 			canOpen:    canOpen,
 			canClose:   canClose,
-			preferOpen: respectScope && beforeUnderscoreOpen && afterOpeningPunctuation(text, start),
+			preferOpen: respectScope && beforeUnderscoreOpen && unicode.Is(unicode.Ps, before),
 		})
 	}
 
@@ -251,10 +251,12 @@ func preferNestedAsteriskOpener(text string, runs []asteriskRun, run *asteriskRu
 		violatesAsteriskRuleOfThree(run, innerClose) {
 		return false
 	}
-	if innerClose.length-run.length >= run.length {
-		return true // one run can close both spans
-	}
-	return innerClose.next >= 0 && canEndAsteriskSpan(text, &runs[innerClose.next])
+	// Treat the punctuation as enclosing the proposed inner span only
+	// when the closer leads out of a bracket as well. Unrelated pairs
+	// later in the text do not establish this relationship.
+	after, _ := utf8.DecodeRuneInString(text[innerClose.start+innerClose.length:])
+	return unicode.Is(unicode.Pe, after) && innerClose.next >= 0 &&
+		canEndAsteriskSpan(text, &runs[innerClose.next])
 }
 
 func canEndAsteriskSpan(text string, run *asteriskRun) bool {

@@ -506,11 +506,13 @@ func TestConvertPreservesCodeAndNestedStyles(t *testing.T) {
 		{"quoted bold followed by italic", `**"bold"**_italic_`, `*"bold"*_italic_`},
 		{"literal opening bracket ends independent spoiler", `||See (||. ||another||`, `||See \(||\. ||another||`},
 		{"opening bracket is not a spoiler closer", `||Type (||. (||"OK"||)`, `||Type \(||\. \(||"OK"||\)`},
+		{"spoiler can end with a literal opening bracket", `||Read (||"secret"||) and type (||.`, `||Read \("secret"\) and type \(||\.`},
 		{"intraword run cannot close outer spoiler", `||PIN (||) a||!b or c||d`, `||PIN \(||\) a\|\|\!b or c\|\|d`},
 		{"literal opening bracket ends bold before italics", `**See (**_another_`, `*See \(*_another_`},
 		{"later independent bold is not an outer closer", `**Type (**_here_ then (**"OK"**)`, `*Type \(*_here_ then \(*"OK"*\)`},
 		{"straight opening quote is not a bold closer", `**Type (**_here_ then "**!**"`, `*Type \(*_here_ then "*\!*"`},
 		{"curly opening quote is not a bold closer", `**Type (**_here_ then “**!**”`, `*Type \(*_here_ then “*\!*”`},
+		{"bold can end with a literal straight quote", `**Type "**_here_—**!**`, `*Type "*_here_—*\!*`},
 		{"independent spoilers", "||one|| and ||two||", "||one|| and ||two||"},
 		{"reserved closer byte is stripped", "a\x12\x05b", "ab"},
 	}
