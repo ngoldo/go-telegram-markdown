@@ -108,7 +108,7 @@ func replaceAsteriskEmphasis(text string, respectScope bool) string {
 			next:       -1,
 			canOpen:    canOpen,
 			canClose:   canClose,
-			preferOpen: respectScope && beforeUnderscoreOpen && isOpeningPunctuation(before),
+			preferOpen: respectScope && beforeUnderscoreOpen && afterOpeningPunctuation(text, start),
 		})
 	}
 
@@ -258,8 +258,7 @@ func preferNestedAsteriskOpener(text string, runs []asteriskRun, run *asteriskRu
 }
 
 func canEndAsteriskSpan(text string, run *asteriskRun) bool {
-	before, _ := utf8.DecodeLastRuneInString(text[:run.start])
-	return run.canClose && (!run.canOpen || !isOpeningPunctuation(before))
+	return run.canClose && (!run.canOpen || !afterOpeningPunctuation(text, run.start))
 }
 
 func isUnderscoreMarker(marker byte) bool {

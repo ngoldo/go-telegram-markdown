@@ -239,7 +239,7 @@ func replaceDelimited(text, delim string, repl func(content string) string) stri
 			// An opening bracket or quote directly before a run favours
 			// a nested opener if it has content on the right and another
 			// delimiter follows. Match that inner pair on this pass.
-			if isOpeningPunctuation(previous) && !unicode.IsSpace(next) &&
+			if afterOpeningPunctuation(text, j) && !unicode.IsSpace(next) &&
 				canOpenNestedSpan(text, runs, closer, width) {
 				continue
 			}
@@ -271,10 +271,19 @@ func canOpenNestedSpan(text string, runs []delimiterRun, opener, width int) bool
 func hasClosingBoundary(text string, start, width int) bool {
 	last, _ := utf8.DecodeLastRuneInString(text[:start])
 	next, _ := utf8.DecodeRuneInString(text[start+width:])
-	return !unicode.IsSpace(last) && !isWordRune(next)
+	return !unicode.IsSpace(last) && !isWordRune(next) &&
+		(start+width == len(text) || unicode.IsSpace(next) || !afterOpeningPunctuation(text, start))
 }
 
-func isOpeningPunctuation(r rune) bool {
+func afterOpeningPunctuation(text string, offset int) bool {
+	r, size := utf8.DecodeLastRuneInString(text[:offset])
+	if r == '"' || r == '\'' {
+		// Straight quotes use the same rune at both ends. A quote after
+		// whitespace or an opening bracket belongs to the following text.
+		before, _ := utf8.DecodeLastRuneInString(text[:offset-size])
+		return offset == size || unicode.IsSpace(before) ||
+			unicode.Is(unicode.Ps, before) || unicode.Is(unicode.Pi, before)
+	}
 	return unicode.Is(unicode.Ps, r) || unicode.Is(unicode.Pi, r)
 }
 

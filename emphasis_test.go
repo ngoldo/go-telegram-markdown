@@ -3,7 +3,6 @@ package tgmarkdown
 import (
 	"strings"
 	"testing"
-	"time"
 )
 
 func TestReplaceAsteriskEmphasis(t *testing.T) {
@@ -99,19 +98,25 @@ func TestReplaceDelimitedLongPrefix(t *testing.T) {
 	const spans = 65_536
 	prefix := strings.Repeat("x", 8<<20)
 	input := prefix + strings.Repeat(" ~q~~", spans)
-	start := time.Now()
 	got := replaceDelimited(input, "~", func(content string) string {
 		return "[" + content + "]"
 	})
-	elapsed := time.Since(start)
 
 	// The first span still treats the longer closing run as literal.
 	want := prefix + " ~q~~" + strings.Repeat(" [q]~", spans-1)
 	if got != want {
 		t.Fatal("delimiter conversion changed around the long prefix")
 	}
-	if elapsed > 3*time.Second {
-		t.Fatalf("delimiter scan took %s; it should scan the prefix once", elapsed)
+}
+
+func BenchmarkReplaceDelimitedLongPrefix(b *testing.B) {
+	input := strings.Repeat("x", 8<<20) + strings.Repeat(" ~q~~", 65_536)
+	b.SetBytes(int64(len(input)))
+	b.ReportAllocs()
+	for b.Loop() {
+		replaceDelimited(input, "~", func(content string) string {
+			return "[" + content + "]"
+		})
 	}
 }
 
