@@ -84,7 +84,7 @@ func TestReplaceAsteriskEmphasis(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got, balanced := restorePlaceholders(replaceAsteriskEmphasis(tt.in)); !balanced || got != tt.want {
+			if got, balanced := restorePlaceholders(replaceAsteriskEmphasis(tt.in, true)); !balanced || got != tt.want {
 				t.Fatalf("replaceAsteriskEmphasis(%q)\n got: %q\nwant: %q", tt.in, got, tt.want)
 			}
 		})

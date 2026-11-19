@@ -439,6 +439,7 @@ func TestConvertSafetyNet(t *testing.T) {
 	}{
 		{"crossing italic strike", "_~_~", `\_\~\_\~`},
 		{"crossing bold strike", "~**~**", `\~\*\*\~\*\*`},
+		{"crossing bold underline", "**a __b** c__", `\*\*a \_\_b\*\* c\_\_`},
 		{"crossing underline spoiler", "__||__||", `\_\_\|\|\_\_\|\|`},
 		// Emphasis opened in a blockquote and closed on an unquoted line is
 		// rejected at the blockquote-ending newline.
@@ -504,7 +505,9 @@ func TestConvertPreservesCodeAndNestedStyles(t *testing.T) {
 		{"bold followed by italic", "**bold**_italic_", "*bold*_italic_"},
 		{"quoted bold followed by italic", `**"bold"**_italic_`, `*"bold"*_italic_`},
 		{"literal opening bracket ends independent spoiler", `||See (||. ||another||`, `||See \(||\. ||another||`},
+		{"intraword run cannot close outer spoiler", `||PIN (||) a||!b or c||d`, `||PIN \(||\) a\|\|\!b or c\|\|d`},
 		{"literal opening bracket ends bold before italics", `**See (**_another_`, `*See \(*_another_`},
+		{"later independent bold is not an outer closer", `**Type (**_here_ then (**"OK"**)`, `*Type \(*_here_ then \(*"OK"*\)`},
 		{"independent spoilers", "||one|| and ||two||", "||one|| and ||two||"},
 		{"reserved closer byte is stripped", "a\x12\x05b", "ab"},
 	}

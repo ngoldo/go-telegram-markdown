@@ -264,8 +264,13 @@ func canOpenNestedSpan(text string, runs []delimiterRun, opener, width int) bool
 	if closer.next < 0 {
 		return false // the enclosing span needs a closer of its own
 	}
-	last, _ := utf8.DecodeLastRuneInString(text[run.closer+width : closer.closer])
-	next, _ := utf8.DecodeRuneInString(text[closer.closer+width:])
+	return hasClosingBoundary(text, closer.closer, width) &&
+		hasClosingBoundary(text, runs[closer.next].closer, width)
+}
+
+func hasClosingBoundary(text string, start, width int) bool {
+	last, _ := utf8.DecodeLastRuneInString(text[:start])
+	next, _ := utf8.DecodeRuneInString(text[start+width:])
 	return !unicode.IsSpace(last) && !isWordRune(next)
 }
 
@@ -510,7 +515,7 @@ func convert(text string, inline bool) string {
 		})
 		// Resolve enclosing underscores before the asterisk pass tests word
 		// boundaries. Raw underscores would hide valid asterisk runs.
-		text = replaceAsteriskEmphasis(text)
+		text = replaceAsteriskEmphasis(text, true)
 		text = replaceDelimited(text, "~~", func(c string) string {
 			return phStrike + c + phClose + phStrike
 		})
@@ -523,6 +528,12 @@ func convert(text string, inline bool) string {
 		if text == before {
 			break
 		}
+	}
+	// Once every within-scope asterisk pair is resolved, try the remaining
+	// pairs across scope boundaries. The renderer rejects crossing spans
+	// so malformed input keeps the documented plain-text fallback.
+	if strings.Contains(text, phClose) {
+		text = replaceAsteriskEmphasis(text, false)
 	}
 	if !inline {
 		text = blockquoteRe.ReplaceAllString(text, phQuote+"${1}")

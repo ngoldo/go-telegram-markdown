@@ -17,6 +17,7 @@ type asteriskRun struct {
 	start      int
 	length     int
 	scope      int
+	next       int
 	leftUsed   int
 	rightUsed  int
 	canOpen    bool
@@ -38,7 +39,7 @@ func (r *asteriskRun) remaining() int {
 // delimiters embedded directly in a word stay literal. Whitespace flanking and
 // the CommonMark multiple-of-three rule prevent list markers and ambiguous
 // delimiter runs from becoming emphasis.
-func replaceAsteriskEmphasis(text string) string {
+func replaceAsteriskEmphasis(text string, respectScope bool) string {
 	if !strings.Contains(text, "*") {
 		return text
 	}
@@ -96,32 +97,38 @@ func replaceAsteriskEmphasis(text string) string {
 		canClose := haveBefore && !unicode.IsSpace(before) &&
 			(!haveAfter || !isWordRune(after))
 
+		enclosing := 0
+		if respectScope {
+			enclosing = scope.current()
+		}
 		runs = append(runs, asteriskRun{
 			start:      start,
 			length:     end - start,
-			scope:      scope.current(),
+			scope:      enclosing,
+			next:       -1,
 			canOpen:    canOpen,
 			canClose:   canClose,
-			preferOpen: beforeUnderscoreOpen && isOpeningPunctuation(before),
+			preferOpen: respectScope && beforeUnderscoreOpen && isOpeningPunctuation(before),
 		})
+	}
+
+	if respectScope {
+		nextByScope := make(map[int]int)
+		for i := len(runs) - 1; i >= 0; i-- {
+			run := &runs[i]
+			if next, ok := nextByScope[run.scope]; ok {
+				run.next = next
+			}
+			nextByScope[run.scope] = i
+		}
 	}
 
 	matched := false
 	byScope := make(map[int]*[6][]int)
-	remainingClosers := make(map[int]int)
-	for _, run := range runs {
-		if run.canClose {
-			remainingClosers[run.scope] += run.length
-		}
-	}
 	for closerIndex := range runs {
 		closer := &runs[closerIndex]
 		openers := byScope[closer.scope]
-		if closer.canClose {
-			remainingClosers[closer.scope] -= closer.length
-		}
-		preferNestedOpener := closer.preferOpen && remainingClosers[closer.scope] > closer.length
-		if closer.canClose && openers != nil && !preferNestedOpener {
+		if closer.canClose && openers != nil && !preferNestedAsteriskOpener(text, runs, closer) {
 			for closer.remaining() > 0 {
 				openerIndex := -1
 				openerGroup := -1
@@ -230,6 +237,29 @@ func replaceAsteriskEmphasis(text string) string {
 	}
 	b.WriteString(text[last:])
 	return b.String()
+}
+
+// Defer a valid closer only if the next runs can close the proposed inner
+// span and still leave a closer for its parent. An independent opener
+// following opening punctuation cannot supply either closing delimiter.
+func preferNestedAsteriskOpener(text string, runs []asteriskRun, run *asteriskRun) bool {
+	if !run.preferOpen || !run.canOpen || run.next < 0 {
+		return false
+	}
+	innerClose := &runs[run.next]
+	if innerClose.length < run.length || !canEndAsteriskSpan(text, innerClose) ||
+		violatesAsteriskRuleOfThree(run, innerClose) {
+		return false
+	}
+	if innerClose.length-run.length >= run.length {
+		return true // one run can close both spans
+	}
+	return innerClose.next >= 0 && canEndAsteriskSpan(text, &runs[innerClose.next])
+}
+
+func canEndAsteriskSpan(text string, run *asteriskRun) bool {
+	before, _ := utf8.DecodeLastRuneInString(text[:run.start])
+	return run.canClose && (!run.canOpen || !isOpeningPunctuation(before))
 }
 
 func isUnderscoreMarker(marker byte) bool {
