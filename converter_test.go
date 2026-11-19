@@ -494,8 +494,11 @@ func TestConvertPreservesCodeAndNestedStyles(t *testing.T) {
 		{"duplicate spoiler with italic", "||outer ||inner _text_|| tail||", "||outer inner _text_ tail||"},
 		{"duplicate spoiler in link label", "||outer [||inner||](url) tail||", "||outer [inner](url) tail||"},
 		{"duplicate bold in link label", "**outer [**inner**](url) tail**", "*outer [inner](url) tail*"},
+		{"spoiler containing bold nested spoiler", `||before **||"answer"||** after||`, `||before *"answer"* after||`},
+		{"spoiler containing bold nested spoiler after punctuation", `||before:**||"answer"||** after||`, `||before:*"answer"* after||`},
+		{"separate bold spans inside underscore italics", `_**"first"**—not bold—**"second"**_`, `_*"first"*—not bold—*"second"*_`},
 		{"independent spoilers", "||one|| and ||two||", "||one|| and ||two||"},
-		{"reserved closer marker stays literal-free", "a\x12\x05b", "ab"},
+		{"reserved closer byte is stripped", "a\x12\x05b", "ab"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

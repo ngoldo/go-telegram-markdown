@@ -193,86 +193,108 @@ func escapeSpecialChars(text string) string {
 //     (e.g. the stray tildes in "a~~b~~c" or the pipes in "a|||b|||c") and does
 //     not match, so half of a run never opens a lone span.
 //
-// Escaped delimiter bytes and shorter runs may remain literal content, so the
-// closer search advances past them to the next complete unescaped candidate.
-// Failed opener candidates advance by one position, like a regex engine's
-// scan.
+// Escaped delimiters and delimiters inside a different already-matched
+// emphasis span cannot close an opener. Index the unescaped positions within
+// each enclosing span so that looking for a closer does not rescan the text.
 func replaceDelimited(text, delim string, repl func(content string) string) string {
 	d := delim[0]
 	firstDelimiter := strings.IndexByte(text, d)
 	if firstDelimiter < 0 || !strings.Contains(text[firstDelimiter:], delim) {
 		return text
 	}
+	positions := indexDelimiterPositions(text, delim)
 	var b strings.Builder
-	last, i := 0, firstDelimiter
-	for i < len(text) {
-		if !strings.HasPrefix(text[i:], delim) {
-			i++
+	last := 0
+	for openerIndex, opener := range positions {
+		i := opener.offset
+		if i < last {
 			continue
 		}
-		if i > 0 {
-			r, _ := utf8.DecodeLastRuneInString(text[:i])
-			if r == rune(d) || isWordBefore(text, i) || oddBackslashesBefore(text, i) {
-				i++
+		if i > 0 && (text[i-1] == d || isWordBefore(text, i)) {
+			continue
+		}
+		contentStart := i + len(delim)
+		closer := opener.next
+		for closer >= 0 && positions[closer].offset < contentStart {
+			closer = positions[closer].next
+		}
+		if closer < 0 {
+			// Retain a crossing candidate for the renderer to reject
+			// rather than silently formatting only one of the spans.
+			closer = openerIndex + 1
+			for closer < len(positions) && positions[closer].offset < contentStart {
+				closer++
+			}
+			if closer == len(positions) {
 				continue
 			}
 		}
-		search := i + len(delim)
-		j := -1
-		for search < len(text) {
-			rel := strings.IndexByte(text[search:], d)
-			if rel < 0 {
-				break
-			}
-			candidate := search + rel
-			if strings.HasPrefix(text[candidate:], delim) &&
-				!oddBackslashesBefore(text, candidate) {
-				j = candidate
-				break
-			}
-			// An escaped delimiter is literal content, not proof that the
-			// opener has no later closer: *foo \* bar* must keep looking.
-			search = candidate + 1
-		}
-		if j < 0 {
-			break // no delimiter char remains anywhere
-		}
-		content := text[i+len(delim) : j]
+		j := positions[closer].offset
+		content := text[contentStart:j]
 		if content == "" {
-			i++
 			continue
 		}
-		if after := j + len(delim); after < len(text) {
+		after := j + len(delim)
+		if after < len(text) {
 			r, _ := utf8.DecodeRuneInString(text[after:])
-			switch {
-			case isWordRune(r):
-				// Flanking: a closer flush against a word character does not
-				// close, so "file~1" and "a**b**c" stay literal.
-				i++
-				continue
-			case r == rune(d) && i == firstDelimiter:
-				// A longer run cannot close the first delimiter. A later
-				// opener may instead be followed by an enclosing closer.
-				i++
+			if isWordRune(r) || r == rune(d) && i == firstDelimiter {
+				// A word boundary can rule out a closer. A longer run
+				// can close a nested span if another delimiter precedes it.
 				continue
 			}
 		}
 		first, _ := utf8.DecodeRuneInString(content)
 		lastRune, _ := utf8.DecodeLastRuneInString(content)
 		if unicode.IsSpace(first) || unicode.IsSpace(lastRune) {
-			i++
 			continue
 		}
 		b.WriteString(text[last:i])
 		b.WriteString(repl(content))
-		i = j + len(delim)
-		last = i
+		last = after
 	}
 	if last == 0 {
 		return text
 	}
 	b.WriteString(text[last:])
 	return b.String()
+}
+
+type delimiterPosition struct {
+	offset int
+	next   int
+}
+
+// Assign each enclosing span its own list of delimiters, including spans
+// with the same style. The outermost text uses the zero key.
+func indexDelimiterPositions(text, delim string) []delimiterPosition {
+	var positions []delimiterPosition
+	var spans []int
+	previous := make(map[int]int)
+	for i := 0; i < len(text); i++ {
+		switch text[i] {
+		case phBold[0], phItalic[0], phUnderline[0], phStrike[0], phSpoiler[0]:
+			spans = append(spans, i+1)
+		case phClose[0]:
+			i++ // the next byte names the style being closed
+			if len(spans) > 0 {
+				spans = spans[:len(spans)-1]
+			}
+		default:
+			if text[i] != delim[0] || !strings.HasPrefix(text[i:], delim) || oddBackslashesBefore(text, i) {
+				continue
+			}
+			enclosing := 0
+			if len(spans) > 0 {
+				enclosing = spans[len(spans)-1]
+			}
+			if prior, ok := previous[enclosing]; ok {
+				positions[prior].next = len(positions)
+			}
+			previous[enclosing] = len(positions)
+			positions = append(positions, delimiterPosition{offset: i, next: -1})
+		}
+	}
+	return positions
 }
 
 // restorePlaceholders renders balanced emphasis after the link labels have
@@ -432,7 +454,6 @@ func convert(text string, inline bool) string {
 	const maxEmphasisPasses = 32
 	for range maxEmphasisPasses {
 		before := text
-		text = replaceAsteriskEmphasis(text)
 		text = replaceDelimited(text, "___", func(c string) string {
 			return phUnderline + phItalic + c + phClose + phItalic + phClose + phUnderline
 		})
@@ -442,6 +463,9 @@ func convert(text string, inline bool) string {
 		text = replaceDelimited(text, "_", func(c string) string {
 			return phItalic + c + phClose + phItalic
 		})
+		// Resolve enclosing underscores before the asterisk pass tests word
+		// boundaries. Raw underscores would hide valid asterisk runs.
+		text = replaceAsteriskEmphasis(text)
 		text = replaceDelimited(text, "~~", func(c string) string {
 			return phStrike + c + phClose + phStrike
 		})
