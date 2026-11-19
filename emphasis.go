@@ -265,27 +265,44 @@ func preferNestedAsteriskOpener(text string, runs []asteriskRun, run *asteriskRu
 		return false
 	}
 	opening, _ := utf8.DecodeLastRuneInString(text[:run.start])
-	return hasClosingPunctuation(text[start:end], opening)
+	return punctuationWrapsSpan(text[run.start:end], opening, start-run.start)
 }
 
-func hasClosingPunctuation(text string, opening rune) bool {
+func punctuationWrapsSpan(text string, opening rune, spanEnd int) bool {
+	var closing rune
 	switch opening {
 	case '(':
-		return strings.ContainsRune(text, ')')
+		closing = ')'
 	case '[':
-		return strings.ContainsRune(text, ']')
+		closing = ']'
 	case '{':
-		return strings.ContainsRune(text, '}')
+		closing = '}'
 	case '"', '\'':
-		return strings.ContainsRune(text, opening)
+		closing = opening
+	case '“':
+		closing = '”'
+	case '‘':
+		closing = '’'
+	case '«':
+		closing = '»'
+	case '‹':
+		closing = '›'
 	}
 	closingClass := unicode.Pe
 	if unicode.Is(unicode.Pi, opening) {
 		closingClass = unicode.Pf
 	}
-	for _, r := range text {
-		if unicode.Is(closingClass, r) {
-			return true
+
+	depth := 1
+	for offset, r := range text {
+		switch {
+		case r == closing && closing != 0, closing == 0 && unicode.Is(closingClass, r):
+			depth--
+			if depth == 0 {
+				return offset >= spanEnd
+			}
+		case r == opening:
+			depth++
 		}
 	}
 	return false

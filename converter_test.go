@@ -502,6 +502,7 @@ func TestConvertPreservesCodeAndNestedStyles(t *testing.T) {
 		{"literal asterisk within underline", `**See __file*__ below**`, `*See __file\*__ below*`},
 		{"nested bold meets underscore markers", `**Read (**_this_**) next**`, `*Read \(_this_\) next*`},
 		{"nested bold inside parentheses before a comma", `**Read (**_this_**, please) next**`, `*Read \(_this_, please\) next*`},
+		{"independent parenthesis cannot establish nested bold", `**Type (**_here_ (aside),**!next**`, `*Type \(*_here_ \(aside\),*\!next*`},
 		{"nested bold inside curly quotes", `**Read “**_this_**” next**`, `*Read “_this_” next*`},
 		{"nested bold inside straight quotes", `**Read "**_this_**" next**`, `*Read "_this_" next*`},
 		{"italic followed by bold", "_previous_**next**", "_previous_*next*"},
