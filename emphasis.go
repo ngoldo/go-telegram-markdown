@@ -23,16 +23,6 @@ type asteriskRun struct {
 	repls     []asteriskReplacement
 }
 
-type asteriskMatch struct {
-	openerIndex int
-	closerIndex int
-	openOffset  int
-	closeOffset int
-	width       int
-	marker      string
-	emit        bool
-}
-
 func (r *asteriskRun) remaining() int {
 	return r.length - r.leftUsed - r.rightUsed
 }
@@ -105,7 +95,6 @@ func replaceAsteriskEmphasis(text string) string {
 	}
 
 	matched := false
-	var matches []asteriskMatch
 	var openers [6][]int
 	for closerIndex := range runs {
 		closer := &runs[closerIndex]
@@ -154,14 +143,15 @@ func replaceAsteriskEmphasis(text string) string {
 
 				closeOffset := closer.leftUsed
 				closer.leftUsed += width
-				matches = append(matches, asteriskMatch{
-					openerIndex: openerIndex,
-					closerIndex: closerIndex,
-					openOffset:  openOffset,
-					closeOffset: closeOffset,
-					width:       width,
-					marker:      marker,
-					emit:        true,
+				opener.repls = append(opener.repls, asteriskReplacement{
+					offset: openOffset,
+					width:  width,
+					marker: marker,
+				})
+				closer.repls = append(closer.repls, asteriskReplacement{
+					offset: closeOffset,
+					width:  width,
+					marker: phClose + marker,
 				})
 				matched = true
 
@@ -183,31 +173,6 @@ func replaceAsteriskEmphasis(text string) string {
 
 	if !matched {
 		return text
-	}
-
-	// Telegram cannot represent an entity nested inside another entity of the
-	// same type. Such nesting is idempotent, so flatten it to the outer span
-	// whilst still consuming every source delimiter. Without this step,
-	// ****text**** would become **text**, which TDLib interprets as empty bold
-	// entities rather than bold text.
-	suppressNestedAsteriskMatches(matches, runs)
-	for _, match := range matches {
-		marker := ""
-		if match.emit {
-			marker = match.marker
-		}
-		opener := &runs[match.openerIndex]
-		opener.repls = append(opener.repls, asteriskReplacement{
-			offset: match.openOffset,
-			width:  match.width,
-			marker: marker,
-		})
-		closer := &runs[match.closerIndex]
-		closer.repls = append(closer.repls, asteriskReplacement{
-			offset: match.closeOffset,
-			width:  match.width,
-			marker: marker,
-		})
 	}
 
 	var b strings.Builder
@@ -257,41 +222,6 @@ func asteriskStartsKeycap(text string, pos int) bool {
 		r, _ = utf8.DecodeRuneInString(text[pos:])
 	}
 	return r == '\u20E3'
-}
-
-func suppressNestedAsteriskMatches(matches []asteriskMatch, runs []asteriskRun) {
-	for _, marker := range []string{phBold, phItalic} {
-		var ordered []int
-		for i := range matches {
-			if matches[i].marker == marker {
-				ordered = append(ordered, i)
-			}
-		}
-		sort.Slice(ordered, func(i, j int) bool {
-			left := matches[ordered[i]]
-			right := matches[ordered[j]]
-			leftStart := runs[left.openerIndex].start + left.openOffset + left.width
-			rightStart := runs[right.openerIndex].start + right.openOffset + right.width
-			if leftStart != rightStart {
-				return leftStart < rightStart
-			}
-			leftEnd := runs[left.closerIndex].start + left.closeOffset
-			rightEnd := runs[right.closerIndex].start + right.closeOffset
-			return leftEnd > rightEnd
-		})
-
-		outerEnd := -1
-		for _, matchIndex := range ordered {
-			match := &matches[matchIndex]
-			start := runs[match.openerIndex].start + match.openOffset + match.width
-			end := runs[match.closerIndex].start + match.closeOffset
-			if start < outerEnd && end <= outerEnd {
-				match.emit = false
-				continue
-			}
-			outerEnd = end
-		}
-	}
 }
 
 func violatesAsteriskRuleOfThree(opener, closer *asteriskRun) bool {

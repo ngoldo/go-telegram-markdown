@@ -5,9 +5,8 @@ import "strings"
 // isolateInlineLinks replaces each inline Markdown link with the value returned
 // by store. It recognises nested brackets in link text, balanced parentheses in
 // destinations, and angle-bracket destinations. URL backslash escapes are
-// decoded before the values are handed to store. Link-text escapes which carry
-// Markdown meaning remain escaped for the caller's recursive inline conversion;
-// escapes of other ASCII punctuation are decoded immediately.
+// decoded before the values are handed to store. The label is handed to the
+// recursive inline converter with its original escapes.
 //
 // The structural indexes are built in one pass. In particular, a malformed
 // destination is never rescanned for each preceding '[', keeping the scanner
@@ -68,7 +67,7 @@ func isolateInlineLinks(text string, store func(linkText, url string) string) st
 			}
 
 			out.WriteString(text[last:openBracket])
-			linkText := normaliseCommonMarkLinkTextEscapes(text[openBracket+1 : i])
+			linkText := text[openBracket+1 : i]
 			url := decodeCommonMarkEscapes(text[urlStart:urlEnd])
 			out.WriteString(store(linkText, url))
 

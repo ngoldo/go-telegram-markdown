@@ -339,7 +339,7 @@ func TestConvertNesting(t *testing.T) {
 	}{
 		// Adjacent underscore runs are separated by \r at every boundary,
 		// so nothing collapses into an ambiguous ___ that Telegram misreads.
-		{"italic wrapping triple underscore", "*___both___*", "_\r__\r_both_\r__\r_"},
+		{"italic wrapping triple underscore", "*___both___*", "_\r__both__\r_"},
 		{"bold wrapping triple underscore", "**bold ___both___ bold**", "*bold __\r_both_\r__ bold*"},
 		{"italic flush with underline", "*__x__*", "_\r__x__\r_"},
 		{"bold italic flush with underline", "***__x__***", "*_\r__x__\r_*"},
@@ -477,6 +477,32 @@ func TestValidMarkdownV2(t *testing.T) {
 		if validMarkdownV2(s) {
 			t.Errorf("validMarkdownV2(%q) = true, want false", s)
 		}
+	}
+}
+
+func TestConvertPreservesCodeAndNestedStyles(t *testing.T) {
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"backslash inside linked code", "[run `a\\?b` and \\?](https://example.org)", "[run `a\\\\?b` and ?](https://example.org)"},
+		{"backslash inside unsupported image in a link", "[before ![a\\?b](asset) after](url)", "[before \\!\\[a\\\\?b\\]\\(asset\\) after](url)"},
+		{"duplicate underline", "__outer __inner__ tail__", "__outer inner tail__"},
+		{"duplicate strikethrough", "~outer ~~inner~~ tail~", "~outer inner tail~"},
+		{"duplicate spoiler", "||outer ||inner|| tail||", "||outer inner tail||"},
+		{"duplicate spoiler with italic", "||outer ||inner _text_|| tail||", "||outer inner _text_ tail||"},
+		{"duplicate spoiler in link label", "||outer [||inner||](url) tail||", "||outer [inner](url) tail||"},
+		{"duplicate bold in link label", "**outer [**inner**](url) tail**", "*outer [inner](url) tail*"},
+		{"independent spoilers", "||one|| and ||two||", "||one|| and ||two||"},
+		{"reserved closer marker stays literal-free", "a\x12\x05b", "ab"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := Convert(tt.in); got != tt.want {
+				t.Fatalf("Convert(%q) = %q, want %q", tt.in, got, tt.want)
+			}
+		})
 	}
 }
 

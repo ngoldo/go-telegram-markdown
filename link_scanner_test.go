@@ -44,9 +44,9 @@ func TestIsolateInlineLinks(t *testing.T) {
 			wantURL:  `https://example.com/a b`,
 		},
 		{
-			name:     "ASCII punctuation escapes are decoded",
+			name:     "URL escapes are decoded while label escapes are retained",
 			input:    `[x \/](https://example.com/a\_b)`,
-			wantText: `x /`,
+			wantText: `x \/`,
 			wantURL:  `https://example.com/a_b`,
 		},
 	}
