@@ -14,13 +14,15 @@ type asteriskReplacement struct {
 }
 
 type asteriskRun struct {
-	start     int
-	length    int
-	leftUsed  int
-	rightUsed int
-	canOpen   bool
-	canClose  bool
-	repls     []asteriskReplacement
+	start      int
+	length     int
+	scope      int
+	leftUsed   int
+	rightUsed  int
+	canOpen    bool
+	canClose   bool
+	preferOpen bool
+	repls      []asteriskReplacement
 }
 
 func (r *asteriskRun) remaining() int {
@@ -42,7 +44,12 @@ func replaceAsteriskEmphasis(text string) string {
 	}
 
 	var runs []asteriskRun
+	var scope emphasisScope
 	for i := 0; i < len(text); {
+		if width := scope.consume(text[i], i); width != 0 {
+			i += width
+			continue
+		}
 		if text[i] != '*' {
 			i++
 			continue
@@ -81,24 +88,40 @@ func replaceAsteriskEmphasis(text string) string {
 			after, _ = utf8.DecodeRuneInString(text[end:])
 		}
 
+		// A run directly after an opening bracket and before an
+		// underscore span can introduce that span, not end a previous one.
+		beforeUnderscoreOpen := haveAfter && isUnderscoreMarker(text[end])
 		canOpen := haveAfter && !unicode.IsSpace(after) &&
 			(!haveBefore || !isWordBefore(text, start))
 		canClose := haveBefore && !unicode.IsSpace(before) &&
 			(!haveAfter || !isWordRune(after))
 
 		runs = append(runs, asteriskRun{
-			start:    start,
-			length:   end - start,
-			canOpen:  canOpen,
-			canClose: canClose,
+			start:      start,
+			length:     end - start,
+			scope:      scope.current(),
+			canOpen:    canOpen,
+			canClose:   canClose,
+			preferOpen: beforeUnderscoreOpen && isOpeningPunctuation(before),
 		})
 	}
 
 	matched := false
-	var openers [6][]int
+	byScope := make(map[int]*[6][]int)
+	remainingClosers := make(map[int]int)
+	for _, run := range runs {
+		if run.canClose {
+			remainingClosers[run.scope] += run.length
+		}
+	}
 	for closerIndex := range runs {
 		closer := &runs[closerIndex]
+		openers := byScope[closer.scope]
 		if closer.canClose {
+			remainingClosers[closer.scope] -= closer.length
+		}
+		preferNestedOpener := closer.preferOpen && remainingClosers[closer.scope] > closer.length
+		if closer.canClose && openers != nil && !preferNestedOpener {
 			for closer.remaining() > 0 {
 				openerIndex := -1
 				openerGroup := -1
@@ -163,6 +186,10 @@ func replaceAsteriskEmphasis(text string) string {
 		}
 
 		if closer.canOpen && closer.remaining() > 0 {
+			if openers == nil {
+				openers = new([6][]int)
+				byScope[closer.scope] = openers
+			}
 			group := closer.length % 3 * 2
 			if closer.canClose {
 				group++
@@ -203,6 +230,10 @@ func replaceAsteriskEmphasis(text string) string {
 	}
 	b.WriteString(text[last:])
 	return b.String()
+}
+
+func isUnderscoreMarker(marker byte) bool {
+	return marker == phItalic[0] || marker == phUnderline[0]
 }
 
 func asteriskStartsKeycap(text string, pos int) bool {

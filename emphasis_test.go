@@ -114,3 +114,12 @@ func TestReplaceDelimitedLongPrefix(t *testing.T) {
 		t.Fatalf("delimiter scan took %s; it should scan the prefix once", elapsed)
 	}
 }
+
+func TestIndexDelimiterRunsKeepsLiteralRunsCompact(t *testing.T) {
+	// A long unmatched run must occupy one index entry, rather than one
+	// entry for each position where the delimiter could begin.
+	runs := indexDelimiterRuns(strings.Repeat("_", 1<<20), "__")
+	if len(runs) != 1 || runs[0].length != 1<<20 {
+		t.Fatalf("indexed %d runs, want one full-width run", len(runs))
+	}
+}

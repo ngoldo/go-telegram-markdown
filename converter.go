@@ -202,51 +202,47 @@ func replaceDelimited(text, delim string, repl func(content string) string) stri
 	if firstDelimiter < 0 || !strings.Contains(text[firstDelimiter:], delim) {
 		return text
 	}
-	positions := indexDelimiterPositions(text, delim)
+	width := len(delim)
+	runs := indexDelimiterRuns(text, delim)
 	var b strings.Builder
 	last := 0
-	for openerIndex, opener := range positions {
-		i := opener.offset
-		if i < last {
+	for pos, opener := range runs {
+		i := opener.start
+		if i < last || i != opener.closer || opener.length >= 2*width {
 			continue
 		}
-		if i > 0 && (text[i-1] == d || isWordBefore(text, i)) {
+		if isWordBefore(text, i) {
 			continue
 		}
-		contentStart := i + len(delim)
 		closer := opener.next
-		for closer >= 0 && positions[closer].offset < contentStart {
-			closer = positions[closer].next
-		}
 		if closer < 0 {
 			// Retain a crossing candidate for the renderer to reject
 			// rather than silently formatting only one of the spans.
-			closer = openerIndex + 1
-			for closer < len(positions) && positions[closer].offset < contentStart {
-				closer++
-			}
-			if closer == len(positions) {
+			closer = pos + 1
+			if closer == len(runs) {
 				continue
 			}
 		}
-		j := positions[closer].offset
-		content := text[contentStart:j]
-		if content == "" {
-			continue
-		}
-		after := j + len(delim)
-		if after < len(text) {
-			r, _ := utf8.DecodeRuneInString(text[after:])
-			if isWordRune(r) || r == rune(d) && i == firstDelimiter {
-				// A word boundary can rule out a closer. A longer run
-				// can close a nested span if another delimiter precedes it.
-				continue
-			}
-		}
+		j := runs[closer].closer
+		content := text[i+width : j]
 		first, _ := utf8.DecodeRuneInString(content)
-		lastRune, _ := utf8.DecodeLastRuneInString(content)
-		if unicode.IsSpace(first) || unicode.IsSpace(lastRune) {
+		previous, _ := utf8.DecodeLastRuneInString(content)
+		if unicode.IsSpace(first) || unicode.IsSpace(previous) {
 			continue
+		}
+		after := j + width
+		if after < len(text) {
+			next, _ := utf8.DecodeRuneInString(text[after:])
+			if isWordRune(next) || next == rune(d) && i == firstDelimiter {
+				continue
+			}
+			// An opening bracket or quote directly before a run favours
+			// a nested opener if it has content on the right and another
+			// delimiter follows. Match that inner pair on this pass.
+			if isOpeningPunctuation(previous) && !unicode.IsSpace(next) &&
+				canOpenNestedSpan(text, runs, closer, width) {
+				continue
+			}
 		}
 		b.WriteString(text[last:i])
 		b.WriteString(repl(content))
@@ -259,42 +255,91 @@ func replaceDelimited(text, delim string, repl func(content string) string) stri
 	return b.String()
 }
 
-type delimiterPosition struct {
-	offset int
+func canOpenNestedSpan(text string, runs []delimiterRun, opener, width int) bool {
+	run := runs[opener]
+	if run.start != run.closer || run.length >= 2*width || run.next < 0 {
+		return false
+	}
+	closer := runs[run.next]
+	if closer.next < 0 {
+		return false // the enclosing span needs a closer of its own
+	}
+	last, _ := utf8.DecodeLastRuneInString(text[run.closer+width : closer.closer])
+	next, _ := utf8.DecodeRuneInString(text[closer.closer+width:])
+	return !unicode.IsSpace(last) && !isWordRune(next)
+}
+
+func isOpeningPunctuation(r rune) bool {
+	return unicode.Is(unicode.Ps, r) || unicode.Is(unicode.Pi, r)
+}
+
+type delimiterRun struct {
+	start  int
+	length int
+	closer int
 	next   int
 }
 
-// Assign each enclosing span its own list of delimiters, including spans
-// with the same style. The outermost text uses the zero key.
-func indexDelimiterPositions(text, delim string) []delimiterPosition {
-	var positions []delimiterPosition
-	var spans []int
+// Index each unescaped run once, with a separate chain for every enclosing
+// span. A run can close at its second byte if only its first byte is escaped.
+func indexDelimiterRuns(text, delim string) []delimiterRun {
+	var runs []delimiterRun
+	var scope emphasisScope
 	previous := make(map[int]int)
-	for i := 0; i < len(text); i++ {
-		switch text[i] {
-		case phBold[0], phItalic[0], phUnderline[0], phStrike[0], phSpoiler[0]:
-			spans = append(spans, i+1)
-		case phClose[0]:
-			i++ // the next byte names the style being closed
-			if len(spans) > 0 {
-				spans = spans[:len(spans)-1]
-			}
-		default:
-			if text[i] != delim[0] || !strings.HasPrefix(text[i:], delim) || oddBackslashesBefore(text, i) {
-				continue
-			}
-			enclosing := 0
-			if len(spans) > 0 {
-				enclosing = spans[len(spans)-1]
-			}
-			if prior, ok := previous[enclosing]; ok {
-				positions[prior].next = len(positions)
-			}
-			previous[enclosing] = len(positions)
-			positions = append(positions, delimiterPosition{offset: i, next: -1})
+	for i := 0; i < len(text); {
+		if width := scope.consume(text[i], i); width != 0 {
+			i += width
+			continue
 		}
+		if text[i] != delim[0] {
+			i++
+			continue
+		}
+		start := i
+		for i < len(text) && text[i] == delim[0] {
+			i++
+		}
+		closer := start
+		if oddBackslashesBefore(text, start) {
+			closer++
+		}
+		if i-closer < len(delim) {
+			continue
+		}
+		enclosing := scope.current()
+		if prior, ok := previous[enclosing]; ok {
+			runs[prior].next = len(runs)
+		}
+		previous[enclosing] = len(runs)
+		runs = append(runs, delimiterRun{start: start, length: i - start, closer: closer, next: -1})
 	}
-	return positions
+	return runs
+}
+
+// An opening marker's offset identifies its scope, including when several
+// distinct spans use the same style. The outermost text has scope zero.
+type emphasisScope []int
+
+func (s *emphasisScope) consume(marker byte, offset int) int {
+	switch marker {
+	case phBold[0], phItalic[0], phUnderline[0], phStrike[0], phSpoiler[0]:
+		*s = append(*s, offset+1)
+		return 1
+	case phClose[0]:
+		if len(*s) > 0 {
+			*s = (*s)[:len(*s)-1]
+		}
+		return 2 // the following byte names the closing style
+	default:
+		return 0
+	}
+}
+
+func (s emphasisScope) current() int {
+	if len(s) == 0 {
+		return 0
+	}
+	return s[len(s)-1]
 }
 
 // restorePlaceholders renders balanced emphasis after the link labels have
